@@ -49,6 +49,7 @@ namespace HavenSoft.HexManiac.Core.ViewModels {
          isText = new StubCommand();
 
       private readonly object threadlock = new();
+      private readonly IFileSystem fs;
 
       private MapEditorViewModel mapper;
       public bool HasValidMapper => mapper?.IsValidState ?? false;
@@ -244,7 +245,12 @@ namespace HavenSoft.HexManiac.Core.ViewModels {
                      var bestMaps = maps.Where(info => info.Name.Contains(str)).ToList();
                      if (bestMaps.Count == 1) gotoMap = bestMaps[0];
                   }
-                  if (maps.Count >= 1 && maps.All(m => maps[0].Name.Contains(m.Name.Split('(', ')')[1])) && mapper != null && !str.TryParseHex(out _)) {
+                  string ExtractShortName(MapInfo map) {
+                     var parts = map.Name.Split(".").ToList();
+                     parts.RemoveAt(parts.Count - 1);
+                     return ".".Join(parts.Skip(2));
+                  }
+                  if (maps.Count >= 1 && maps.All(m => maps[0].Name.Contains(ExtractShortName(m))) && mapper != null && !str.TryParseHex(out _)) {
                      gotoMap = maps[0];
                   } else if (str.Contains("(") && str.Contains(")")) {
                      foreach (var map in maps) {
@@ -266,6 +272,17 @@ namespace HavenSoft.HexManiac.Core.ViewModels {
                         // add the previous map as the back point for the mapper
                         mapper.AddBackNavigation(previousMap.MapID);
                      }
+                     return;
+                  }
+
+                  // documentation check
+                  var matches = docs.Where(doc => doc.Label.Equals(str, StringComparison.InvariantCultureIgnoreCase)).ToList();
+                  var prefixes = new[] { "scripting.overworld.reference.commands", "scripting.overworld.reference.specials" };
+                  foreach (var prefix in prefixes) {
+                     if (matches.Count != 1) matches = docs.Where(doc => doc.Label.Equals($"documentation.{prefix}.{str}", StringComparison.InvariantCultureIgnoreCase)).ToList();
+                  }
+                  if (matches.Count == 1) {
+                     OpenLink(matches[0].Url);
                      return;
                   }
                }
@@ -659,7 +676,7 @@ namespace HavenSoft.HexManiac.Core.ViewModels {
       }
 
       private void CloseExecuted(IFileSystem fileSystem) {
-         if (!history.IsSaved && ownsHistory) {
+         if (!history.IsSaved && Model.ReferenceCount == 1) {
             var metadata = Model.ExportMetadata(RefTable, Singletons.MetadataInfo);
             var result = fileSystem.TrySavePrompt(new LoadedFile(FileName, Model.RawData));
             if (result == null) return;
@@ -668,6 +685,8 @@ namespace HavenSoft.HexManiac.Core.ViewModels {
                history.TagAsSaved();
             }
          }
+         Model.ReferenceCount -= 1;
+
          Closed.Raise(this);
       }
 
@@ -766,7 +785,9 @@ namespace HavenSoft.HexManiac.Core.ViewModels {
             if (changeCount >= maxSegments) changeCountText += "+";
             RaiseMessage($"{changeCountText} changes found.");
             if (changeCount > 0) {
-               RequestTabChange?.Invoke(this, new(diffTab));
+               var args = new TabChangeRequestedEventArgs(diffTab);
+               RequestTabChange?.Invoke(this, args);
+               if (!args.RequestAccepted && otherTab != null) otherTab.RaiseRequestTabChange(args);
             }
          } else {
             throw new NotImplementedException();
@@ -813,8 +834,9 @@ namespace HavenSoft.HexManiac.Core.ViewModels {
       #region Duplicate
 
       public bool CanDuplicate => true;
-      public IEditableViewPort CreateDuplicate() {
-         var child = new ViewPort(FileName, Model, dispatcher, Singletons, mapper?.Tutorials, mapper?.FileSystem, PythonTool, history);
+      IEditableViewPort IEditableViewPort.CreateDuplicate() => CreateDuplicate();
+      public ViewPort CreateDuplicate() {
+         var child = new ViewPort(FileName, Model, dispatcher, Singletons, mapper?.Tutorials, mapper?.FileSystem, PythonTool, history, mapper?.Templates);
          child.selection.GotoAddress(scroll.DataIndex);
          return child;
       }
@@ -875,6 +897,7 @@ namespace HavenSoft.HexManiac.Core.ViewModels {
          SelectionEnd = ConvertAddressToViewPoint(start + size - 1);
       }
 
+      private IReadOnlyList<DocLabel> docs;
       private readonly ToolTray tools;
       public bool HasTools => tools != null;
       public IToolTrayViewModel Tools => tools;
@@ -1011,10 +1034,17 @@ namespace HavenSoft.HexManiac.Core.ViewModels {
 
       public ViewPort() : this(new LoadedFile(string.Empty, new byte[0])) { }
 
-      public ViewPort(string fileName, IDataModel model, IWorkDispatcher dispatcher, Singletons singletons = null, MapTutorialsViewModel tutorials = null, IFileSystem fs = null, PythonTool pythonTool = null, ChangeHistory<ModelDelta> changeHistory = null) {
+      public ViewPort(string fileName, IDataModel model, IWorkDispatcher dispatcher, Singletons singletons = null, MapTutorialsViewModel tutorials = null, IFileSystem fs = null, PythonTool pythonTool = null, ChangeHistory<ModelDelta> changeHistory = null, EventTemplate eventTemplate = null) {
          Singletons = singletons ?? new Singletons();
+         this.fs = fs;
+         this.docs = new List<DocLabel>();
+         if (model.Count >= 0x100 && Singletons.DocReference.TryGetValue(model.GetGameCode().Substring(4), out var docs)) {
+            this.docs = docs;
+         }
          PythonTool = pythonTool;
          ownsHistory = changeHistory == null;
+         model.ReferenceCount += 1;
+
          history = changeHistory ?? new ChangeHistory<ModelDelta>(RevertChanges);
          history.PropertyChanged += HistoryPropertyChanged;
          this.dispatcher = dispatcher ?? InstantDispatch.Instance;
@@ -1063,16 +1093,20 @@ namespace HavenSoft.HexManiac.Core.ViewModels {
          InitializationWorkload = model.InitializationWorkload.ContinueWith(task => {
             var firstViewPort = changeHistory == null;
             if (firstViewPort) {
+               if (eventTemplate == null) eventTemplate = new EventTemplate(singletons?.WorkDispatcher ?? InstantDispatch.Instance, Model, Tools.CodeTool.ScriptParser, BlockMapViewModel.RenderOWs(Model));
                CascadeScripts();
                ValidateMatchedWords();
             }
             dispatcher.DispatchWork(RefreshBackingData); // this work must be done on the UI thread
             if (fs != null) {
-               if (MapEditorViewModel.TryCreateMapEditor(fs, this, singletons, tutorials, out mapper)) {
+               if (MapEditorViewModel.TryCreateMapEditor(fs, this, singletons, tutorials, eventTemplate, out mapper)) {
                   Tools.CodeTool.Investigator = mapper.Templates;
                } else {
                   mapper = null;
                }
+            }
+            if (model is BaseModel bm) {
+               this.docs = this.docs.Concat(bm.GenerateDocumentationLabels(Singletons.ScriptLines)).ToList();
             }
          }, TaskContinuationOptions.ExecuteSynchronously);
       }
@@ -1082,11 +1116,19 @@ namespace HavenSoft.HexManiac.Core.ViewModels {
       private bool ignoreFurtherCommands = false;
       private void ImplementCommands() {
          undoWrapper.CanExecute = history.Undo.CanExecute;
-         undoWrapper.Execute = arg => { history.Undo.Execute(arg); tools.RefreshContent(); };
+         undoWrapper.Execute = arg => {
+            history.Undo.Execute(arg);
+            if (!ownsHistory) RefreshBackingData();
+            tools.RefreshContent();
+         };
          history.Undo.CanExecuteChanged += (sender, e) => undoWrapper.CanExecuteChanged.Invoke(undoWrapper, e);
 
          redoWrapper.CanExecute = history.Redo.CanExecute;
-         redoWrapper.Execute = arg => { history.Redo.Execute(arg); tools.RefreshContent(); };
+         redoWrapper.Execute = arg => {
+            history.Redo.Execute(arg);
+            if (!ownsHistory) RefreshBackingData();
+            tools.RefreshContent();
+         };
          history.Redo.CanExecuteChanged += (sender, e) => redoWrapper.CanExecuteChanged.Invoke(redoWrapper, e);
 
          clear.CanExecute = CanAlwaysExecute;
@@ -1196,7 +1238,7 @@ namespace HavenSoft.HexManiac.Core.ViewModels {
       /// Find scripts called by those scripts, and add runs for those too.
       /// </summary>
       private void CascadeScripts() {
-         var noChange = new NoDataChangeDeltaModel();
+         var noChange = new NoDataChangeDeltaModel { DoNotClearConstants = true };
          using (ModelCacheScope.CreateScope(Model)) {
             foreach (var run in Runs(Model).OfType<IScriptStartRun>().ToList()) {
                if (run is XSERun) {
@@ -1450,6 +1492,7 @@ namespace HavenSoft.HexManiac.Core.ViewModels {
       private void RaiseMessage() => OnMessage?.Invoke(this, deferredMessage);
 
       public void RaiseRequestTabChange(ITabContent tab) => RequestTabChange?.Invoke(this, new(tab));
+      public void RaiseRequestTabChange(TabChangeRequestedEventArgs args) => RequestTabChange?.Invoke(this, args);
 
       public void ClearAnchor() {
          var startDataIndex = scroll.ViewPointToDataIndex(SelectionStart);
@@ -1463,15 +1506,21 @@ namespace HavenSoft.HexManiac.Core.ViewModels {
          Refresh();
       }
 
+      bool inPythonScript = false;
       /// <summary>
       /// The primary Edit method.
       /// If the edit is large, this will create a loading bar that runs from 0 to 100%,
       /// with parts of the edit split off to happen over time.
       /// </summary>
       public void Edit(string input) {
-         if (UpdateInProgress) return;
+         if (UpdateInProgress && !inPythonScript) return;
          lock (threadlock) {
             UpdateInProgress = true;
+            if (inPythonScript) {
+               // no chunking / history changes: just do it all here
+               EditHelper(input, input.Length);
+               return;
+            }
             CurrentProgressScopes.Insert(0, tools.DeferUpdates);
             initialWorkLoad = input.Length;
             postEditWork = 0;
@@ -1573,10 +1622,12 @@ namespace HavenSoft.HexManiac.Core.ViewModels {
                   i += pythonLength - 1;
                   // note that we're ignoring any non-error result here
                   var pythonContent = Environment.NewLine.Join(lines.Skip(1).Take(lines.Length - 2));
-                  var result = PythonTool.RunPythonScript(pythonContent);
-                  if (result.HasError && !result.IsWarning) {
-                     RaiseError(result.ErrorMessage);
-                     exitEditEarly = true;
+                  using (Scope(ref inPythonScript, true, val => inPythonScript = val)) {
+                     var result = PythonTool.RunPythonScript(pythonContent);
+                     if (result.HasError && !result.IsWarning) {
+                        RaiseError(result.ErrorMessage);
+                        exitEditEarly = true;
+                     }
                   }
                } else {
                   Edit(input[i]);
@@ -1746,7 +1797,7 @@ namespace HavenSoft.HexManiac.Core.ViewModels {
       }
 
       public void OpenInNewTab(int destination) {
-         var child = new ViewPort(FileName, Model, dispatcher, Singletons, mapper?.Tutorials, mapper?.FileSystem, PythonTool, history);
+         var child = new ViewPort(FileName, Model, dispatcher, Singletons, mapper?.Tutorials, mapper?.FileSystem, PythonTool, history, mapper?.Templates);
          child.selection.GotoAddress(destination);
          RequestTabChange?.Invoke(this, new(child));
       }
@@ -2453,8 +2504,10 @@ namespace HavenSoft.HexManiac.Core.ViewModels {
       }
 
       public void OpenDexReorderTab(string dexTableName) {
-         var newTab = new DexReorderTab(this, dexTableName, HardcodeTablesModel.DexInfoTableName, dexTableName == HardcodeTablesModel.NationalDexTableName);
-         RequestTabChange(this, new(newTab));
+         var newTab = new DexReorderTab(fs, this, dexTableName, HardcodeTablesModel.DexInfoTableName, dexTableName == HardcodeTablesModel.NationalDexTableName);
+         var args = new TabChangeRequestedEventArgs(newTab);
+         RequestTabChange(this, args);
+         if (!args.RequestAccepted) mapper?.RaiseRequestTabChange(args);
       }
 
       public void OpenImageEditorTab(int address, int spritePage, int palettePage, int preferredTileWidth = -1) {
@@ -2474,6 +2527,43 @@ namespace HavenSoft.HexManiac.Core.ViewModels {
             }
          } catch (ImageEditorViewModelCreationException e) {
             RaiseError(e.Message);
+         }
+      }
+
+      private List<ViewPort> RecentDuplicates = new();
+      public void GotoScript(int address) {
+         if (RecentDuplicates.Count == 0) RecentDuplicates.Add(this);
+
+         int start;
+         foreach (var tab in RecentDuplicates) {
+            // if we're already looking at a script, open this in a new tab instead
+            start = tab.ConvertViewPointToAddress(tab.SelectionStart);
+            if (start == address) {
+               // just switch to this tab
+               var args = new TabChangeRequestedEventArgs(tab);
+               RequestTabChange?.Invoke(mapper, args);
+               if (!args.RequestAccepted) mapper?.RaiseRequestTabChange(args); // if this tab has been closed, ask the mapper to raise it
+               if (args.RequestAccepted) {
+                  tab.selection.SetJumpBackTab(mapper);
+                  FocusToolPanel.Raise(this);
+               }
+               return;
+            }
+         }
+
+         // no open tab has this script loaded
+         // check if we need to make a new tab
+         start = ConvertViewPointToAddress(SelectionStart);
+         if (tools.SelectedTool is CodeTool && Model.GetNextRun(start) is XSERun xse && xse.Start == start) {
+            var newTab = CreateDuplicate();
+            newTab.RecentDuplicates = RecentDuplicates;
+            RecentDuplicates.Add(newTab);
+            newTab.Goto.Execute(address);
+            mapper?.RaiseRequestTabChange(new(newTab));
+         } else {
+            // doesn't look like we're going to a script
+            // just do a normal goto
+            Goto.Execute(address);
          }
       }
 
@@ -2601,21 +2691,23 @@ namespace HavenSoft.HexManiac.Core.ViewModels {
       }
 
       private void IsTextExecuted(object notUsed) {
-         var selectionStart = scroll.ViewPointToDataIndex(selection.SelectionStart);
-         var selectionEnd = scroll.ViewPointToDataIndex(selection.SelectionEnd);
-         var left = Math.Min(selectionStart, selectionEnd);
-         var length = Math.Abs(selectionEnd - selectionStart) + 1;
-         var startPlaces = Model.FindPossibleTextStartingPlaces(left, length);
+         dispatcher.BlockOnUIWork(() => {
+            var selectionStart = scroll.ViewPointToDataIndex(selection.SelectionStart);
+            var selectionEnd = scroll.ViewPointToDataIndex(selection.SelectionEnd);
+            var left = Math.Min(selectionStart, selectionEnd);
+            var length = Math.Abs(selectionEnd - selectionStart) + 1;
+            var startPlaces = Model.FindPossibleTextStartingPlaces(left, length);
 
-         // do the actual search now that we know places to start
-         var foundCount = Model.ConsiderResultsAsTextRuns(() => history.CurrentChange, startPlaces);
-         if (foundCount == 0) {
-            OnError?.Invoke(this, "Failed to automatically find text at that location.");
-         } else {
-            RefreshBackingData();
-         }
+            // do the actual search now that we know places to start
+            var foundCount = Model.ConsiderResultsAsTextRuns( () => history.InsertCustomChange(new NoDataChangeDeltaModel()), startPlaces);
+            if (foundCount == 0) {
+               OnError?.Invoke(this, "Failed to automatically find text at that location.");
+            } else {
+               RefreshBackingData();
+            }
 
-         RequestMenuClose?.Invoke(this, EventArgs.Empty);
+            RequestMenuClose?.Invoke(this, EventArgs.Empty);
+         });
       }
 
       private bool ShouldAcceptInput(Point point, HexElement element, char input) {
@@ -2937,6 +3029,7 @@ namespace HavenSoft.HexManiac.Core.ViewModels {
       /// 00(32)   -> Write 32 bytes of zero. Error if we're not in freespace (FF).
       ///             * Does not error if clearing a subset (or entire) table, so long as the clear matches a multiple of a row length. Still clears that data though.
       ///             * Does not error if clearing exactly the length of a non-table run. Don't clear the data either: all 0's may not be valid (such as with strings)
+      /// FF(0x20) -> Write 0x20 bytes of FF. Errors if there's any metadata. Used for deleting unused bytes.
       /// put(1234)-> put the bytes 12, then 34, at the current location, but don't change the current selection.
       ///             works no matter what the current data is.
       /// importimage(path, greedy) -> imports over the current sprite (or pointer to sprite) using cautious, greedy, or smart.
@@ -2981,6 +3074,14 @@ namespace HavenSoft.HexManiac.Core.ViewModels {
             } else {
                RaiseError($"Writing {length} 00 bytes would overwrite existing data.");
                exitEditEarly = true;
+            }
+         } else if (command.StartsWith("ff(")&&paramsEnd>3&&command.Substring(3,paramsEnd-3).TryParseInt(out length)) {
+            var currentRun = Model.GetNextRun(index);
+            if (currentRun.Start < index || (currentRun.Start == index && currentRun is not NoInfoRun) || (currentRun.Start > index && currentRun.Start < index + length)) {
+               RaiseError($"Writing {length} FF bytes would overwrite formatted data.");
+               exitEditEarly = true;
+            } else {
+               for (int i = 0; i < length; i++) CurrentChange.ChangeData(Model, index + i, 0xFF);
             }
          } else if (command.StartsWith("game(") && paramsEnd > 5) {
             var content = command.Substring(5, paramsEnd - 5).ToLower();
@@ -3266,7 +3367,7 @@ namespace HavenSoft.HexManiac.Core.ViewModels {
                for (int i = 0; i < fullLength; i++) {
                   bool possibleMatch = FindBytes.Length > 0;
                   for (int j = 0; j < FindBytes.Length; j++) {
-                     if (DataOffset + i + j >= Model.Count || Model[DataOffset + i + j] != FindBytes[j]) {
+                     if (!(DataOffset + i + j).InRange(0, Model.Count) || Model[DataOffset + i + j] != FindBytes[j]) {
                         possibleMatch = false;
                         break;
                      }
@@ -3274,11 +3375,13 @@ namespace HavenSoft.HexManiac.Core.ViewModels {
                   if (!possibleMatch) continue;
                   for (int j = 0; j < FindBytes.Length; j++) {
                      var (x, y) = ((i + j) % Width, (i + j) / Width);
-                     if (currentView[x, y].Format is None) {
-                        currentView[x, y] = new HexElement(currentView[x, y].Value, currentView[x, y].Edited, None.ResultInstance);
-                     } else if (currentView[x, y].Format is Anchor anchor && anchor.OriginalFormat is None) {
-                        var newWrapper = new Anchor(None.ResultInstance, anchor.Name, anchor.Format, anchor.Sources);
-                        currentView[x, y] = new HexElement(currentView[x, y].Value, currentView[x, y].Edited, newWrapper);
+                     if (y < Height) {
+                        if (currentView[x, y].Format is None) {
+                           currentView[x, y] = new HexElement(currentView[x, y].Value, currentView[x, y].Edited, None.ResultInstance);
+                        } else if (currentView[x, y].Format is Anchor anchor && anchor.OriginalFormat is None) {
+                           var newWrapper = new Anchor(None.ResultInstance, anchor.Name, anchor.Format, anchor.Sources);
+                           currentView[x, y] = new HexElement(currentView[x, y].Value, currentView[x, y].Edited, newWrapper);
+                        }
                      }
                   }
                   i += FindBytes.Length - 1;
@@ -3320,6 +3423,8 @@ namespace HavenSoft.HexManiac.Core.ViewModels {
             }
          }
       }
+
+      private void OpenLink(string link) => NativeProcess.Start(link);
 
       private void NotifyCollectionChanged(NotifyCollectionChangedEventArgs args) => CollectionChanged?.Invoke(this, args);
    }

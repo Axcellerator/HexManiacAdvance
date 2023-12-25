@@ -80,11 +80,12 @@ namespace HavenSoft.HexManiac.Core.Models.Runs.Sprites {
          }
 
          if (!int.TryParse(format, out int bits)) return false;
+         if (!bits.IsAny(1, 2, 4, 8)) return false;
          tilesetFormat = new TilesetFormat(bits, -1, maxTiles, hint, allowLengthErrors);
          return true;
       }
 
-      public byte[] GetData() => Decompress(Model, Start);
+      public byte[] GetData() => Decompress(Model, Start, AllowLengthErrors);
 
       int[,] ISpriteRun.GetPixels(IDataModel model, int page, int tableIndex) => GetPixels(model, page);
 

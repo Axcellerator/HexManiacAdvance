@@ -68,16 +68,19 @@ namespace HavenSoft.HexManiac.Core.ViewModels {
          currentChange = token;
          currentChange.OnNewChange += OnCurrentTokenDataChanged;
          ClearRedoStack();
-         if (notifyIsSavedChanged) NotifyPropertyChanged(nameof(IsSaved));
       }
 
-      public bool IsSaved => undoStackSizeAtSaveTag == undoStack.Count && currentChange == null;
+      public bool IsSaved {
+         get {
+            return undoStackSizeAtSaveTag == undoStack.Count && (currentChange == null || !currentChange.HasAnyChange);
+         }
+      }
 
       public bool HasDataChange {
          get {
             if (IsSaved) return false;
             var addedElements = undoStack.Count - undoStackSizeAtSaveTag;
-            var undoItems = undoStack.ToArray();
+            var undoItems = undoStack.Reverse().ToArray();
             var redoItems = redoStack.ToArray();
             if (undoStackSizeAtSaveTag == -1) return true;
             for (int i = 0; i < addedElements; i++) {
@@ -156,7 +159,9 @@ namespace HavenSoft.HexManiac.Core.ViewModels {
          var hasDataChange = HasDataChange;
          if (hasDataChange != hasDataChangeCache) {
             hasDataChangeCache = hasDataChange;
-            NotifyPropertyChanged(nameof(HasDataChange));
+            NotifyPropertiesChanged(nameof(HasDataChange), nameof(IsSaved));
+         } else if (!hasDataChange && currentChange.HasAnyChange) {
+            NotifyPropertyChanged(nameof(IsSaved));
          }
       }
 

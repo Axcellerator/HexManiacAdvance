@@ -6,6 +6,7 @@ using HavenSoft.HexManiac.Core.ViewModels;
 using HavenSoft.HexManiac.Core.ViewModels.DataFormats;
 using HavenSoft.HexManiac.Core.ViewModels.Images;
 using HavenSoft.HexManiac.Core.ViewModels.Map;
+using HavenSoft.HexManiac.Core.ViewModels.Tools;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -144,9 +145,10 @@ namespace HexManiac.Core.Models.Runs.Sprites {
          blockModel2.WriteBlockAttributes(secondary.Take(maxUsedSecondary).ToArray(), tokenFactory);
       }
 
-      public static IEnumerable<IPixelViewModel> CalculateBlockRenders(byte[][] blocks, int[][,] tiles, short[][] palettes) {
+      public static IEnumerable<IPixelViewModel> CalculateBlockRenders(byte[][] blocks, byte[][] blockAttributes, int[][,] tiles, IReadOnlyList<short>[] palettes) {
+         palettes = palettes.Select(SpriteTool.CreatePaletteWithUniqueTransparentColor).ToArray();
          for (int i = 0; i < blocks.Length; i++) {
-            yield return BlocksetModel.RenderBlock(blocks[i], tiles, palettes);
+            yield return BlocksetModel.RenderBlock(i, blocks, blockAttributes, tiles, palettes);
          }
       }
 
@@ -187,6 +189,18 @@ namespace HexManiac.Core.Models.Runs.Sprites {
          return new SpriteDecorator(basicFormat, sprite, ExpectedDisplayWidth, availableRows);
       }
 
+      private int backupX = 0, backupY = 0;
+      private int[,] backupContent;
+      public void StoreContentBackupForSizeChange() {
+         backupContent = new int[BlockWidth, BlockHeight];
+         for (int y = 0; y < BlockHeight; y++) {
+            for (int x = 0; x < BlockWidth; x++) {
+               backupContent[x, y] = model.ReadMultiByteValue(Start + (y * BlockWidth + x) * 2, 2);
+            }
+         }
+         backupX = backupY = 0;
+      }
+
       public BlockmapRun TryChangeSize(Func<ModelDelta> tokenFactory, MapDirection direction, int amount, int borderWidth, int borderHeight) {
          if (amount == 0) return null;
 
@@ -202,6 +216,8 @@ namespace HexManiac.Core.Models.Runs.Sprites {
 
       private BlockmapRun TryChangeSize(Func<ModelDelta> tokenFactory, int leftAmount, int upAmount, int rightAmount, int downAmount, int borderWidth, int borderHeight){
          var (newWidth, newHeight) = (BlockWidth + leftAmount + rightAmount, BlockHeight + upAmount + downAmount);
+         backupX -= leftAmount;
+         backupY -= upAmount;
 
          // validate that the new width/height combo is reasonable
          if (newWidth * newHeight > BlockWidth * BlockHeight && !BlockMapViewModel.IsMapWithinSizeLimit(newWidth, newHeight)) return this;
@@ -229,20 +245,33 @@ namespace HexManiac.Core.Models.Runs.Sprites {
          }
 
          // fill new rows/columns
+         var (bWidth, bHeight) = (backupContent.GetLength(0), backupContent.GetLength(1));
          for (int y = yOffset - 1; y >= 0; y--) {
-            for (int x = 0; x < newWidth; x++) newData[x, y] = newData[x, y + borderHeight];
+            for (int x = 0; x < newWidth; x++) {
+               if ((x + backupX).InRange(0, bWidth) && (y + backupY).InRange(0, bHeight)) newData[x, y] = backupContent[x + backupX, y + backupY];
+               else newData[x, y] = newData[x, y + borderHeight];
+            }
          }
          if (yOffset == 0) {
             for (int y = BlockHeight; y < newHeight; y++) {
-               for (int x = 0; x < newWidth; x++) newData[x, y] = newData[x, y - borderHeight];
+               for (int x = 0; x < newWidth; x++) {
+                  if ((x + backupX).InRange(0, bWidth) && (y + backupY).InRange(0, bHeight)) newData[x, y] = backupContent[x + backupX, y + backupY];
+                  else newData[x, y] = newData[x, y - borderHeight];
+               }
             }
          }
          for (int x = xOffset - 1; x >= 0; x--) {
-            for (int y = 0; y < newHeight; y++) newData[x, y] = newData[x + borderWidth, y];
+            for (int y = 0; y < newHeight; y++) {
+               if ((x + backupX).InRange(0, bWidth) && (y + backupY).InRange(0, bHeight)) newData[x, y] = backupContent[x + backupX, y + backupY];
+               else newData[x, y] = newData[x + borderWidth, y];
+            }
          }
          if (xOffset == 0) {
             for (int x = BlockWidth; x < newWidth; x++) {
-               for (int y = 0; y < newHeight; y++) newData[x, y] = newData[x - borderWidth, y];
+               for (int y = 0; y < newHeight; y++) {
+                  if ((x + backupX).InRange(0, bWidth) && (y + backupY).InRange(0, bHeight)) newData[x, y] = backupContent[x + backupX, y + backupY];
+                  else newData[x, y] = newData[x - borderWidth, y];
+               }
             }
          }
 
@@ -263,7 +292,11 @@ namespace HexManiac.Core.Models.Runs.Sprites {
          var layoutStart = primarySource - 12;
          model.WriteValue(token, layoutStart, newWidth);
          model.WriteValue(token, layoutStart + 4, newHeight);
-         var newRun = new BlockmapRun(model, run.Start, run.PointerSources, newWidth, newHeight);
+         var newRun = new BlockmapRun(model, run.Start, run.PointerSources, newWidth, newHeight) {
+            backupContent = backupContent,
+            backupX = backupX,
+            backupY = backupY
+         };
          model.ObserveRunWritten(token, newRun);
          return newRun;
       }
@@ -283,7 +316,7 @@ namespace HexManiac.Core.Models.Runs.Sprites {
          return TryChangeSize(() => token, 0, 0, dx, dy, borderWidth, borderHeight);
       }
 
-      public void AppendTo(IDataModel model, StringBuilder builder, int start, int length, bool deep) {
+      public void AppendTo(IDataModel model, StringBuilder builder, int start, int length, int depth) {
          for (int i = 0; i < length; i += 2) {
             var pair = model.ReadMultiByteValue(start + i, 2);
             builder.Append(pair.ToString("X4"));
@@ -457,6 +490,7 @@ namespace HexManiac.Core.Models.Runs.Sprites {
       /// </summary>
       public IPixelViewModel RenderBlockset(double scale = 1) {
          var blocks = ReadBlocks(PrimaryBlocks);
+         var blockAttributes = ReadBlockAttributes(PrimaryBlocks);
          var tiles = ReadTiles();
          var palettes = ReadPalettes();
          if (IsSecondary) {
@@ -464,7 +498,7 @@ namespace HexManiac.Core.Models.Runs.Sprites {
             for (int i = 0; i < tiles.Length; i++) fullTiles[PrimaryBlocks + i] = tiles[i];
             tiles = fullTiles;
          }
-         var renders = BlockmapRun.CalculateBlockRenders(blocks, tiles, palettes).ToList();
+         var renders = BlockmapRun.CalculateBlockRenders(blocks, blockAttributes, tiles, palettes).ToList();
 
          var rowWidth = BlockMapViewModel.BlocksPerRow;
          var blockHeight = (renders.Count + rowWidth - 1) / rowWidth;
@@ -516,8 +550,10 @@ namespace HexManiac.Core.Models.Runs.Sprites {
          }
       }
 
-      public static IPixelViewModel RenderBlock(byte[] block, int[][,] tiles, short[][] palettes) {
+      public static IPixelViewModel RenderBlock(int i, byte[][] blocks, byte[][] blockAttributes, int[][,] tiles, IReadOnlyList<short>[] palettes) {
          var canvas = new CanvasPixelViewModel(16, 16);
+
+         var block = blocks[i];
 
          // bottom layer
          var tile = Read(block, 0, tiles, palettes);
@@ -544,6 +580,23 @@ namespace HexManiac.Core.Models.Runs.Sprites {
 
          tile = Read(block, 7, tiles, palettes);
          canvas.Draw(tile, 8, 8);
+
+         if (blockAttributes != null && TileAttribute.Create(blockAttributes[i]) is TileAttribute t && t.Layer == 3 && blocks.Length > i + 1) {
+            block = blocks[i + 1];
+
+            // triple layer
+            tile = Read(block, 8, tiles, palettes);
+            canvas.Draw(tile, 0, 0);
+
+            tile = Read(block, 9, tiles, palettes);
+            canvas.Draw(tile, 8, 0);
+
+            tile = Read(block, 10, tiles, palettes);
+            canvas.Draw(tile, 0, 8);
+
+            tile = Read(block, 11, tiles, palettes);
+            canvas.Draw(tile, 8, 8);
+         }
 
          return canvas;
       }
@@ -584,8 +637,8 @@ namespace HexManiac.Core.Models.Runs.Sprites {
          if (tileCount < 1) tileCount = 1;
       }
 
-      public static IPixelViewModel Read(byte[] block, int index, int[][,] tiles, short[][] palettes) {
-         var (pal, hFlip, vFlip, tile) = LzTilemapRun.ReadTileData(block, index, 2);
+      public static IPixelViewModel Read(byte[] block, int index, int[][,] tiles, IReadOnlyList<short>[] palettes) {
+         var (pal, hFlip, vFlip, tile) = LzTilemapRun.ReadTileData(block, index % 8, 2);
 
          if (pal >= palettes.Length) return new ReadonlyPixelViewModel(8, 8, new short[64]);
 

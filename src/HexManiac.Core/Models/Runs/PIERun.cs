@@ -389,7 +389,7 @@ namespace HavenSoft.HexManiac.Core.Models.Runs {
                   if (toParse == "leveluphealth") editScope.Result.Arg = HealthRestore_FromLevelUp;
                   else if (toParse == "half") editScope.Result.Arg = HealthRestore_Half;
                   else if (toParse == "max") editScope.Result.Arg = HealthRestore_Max;
-                  else if (sbyte.TryParse(pair.Value, out parseInt)) editScope.Result.Arg = parseInt;
+                  else if (short.TryParse(pair.Value, out var parseShort)) editScope.Result.Arg = parseShort;
                }
 
                if (pair.Key == "lowhappinesschange" && editScope.Result.HasLowHappinessByte && sbyte.TryParse(pair.Value, out parseInt)) editScope.Result.LowHappinessChange = parseInt;
@@ -464,7 +464,7 @@ namespace HavenSoft.HexManiac.Core.Models.Runs {
       public IReadOnlyList<IPixelViewModel> Visualizations => new List<IPixelViewModel>();
       public bool DependsOn(string anchorName) => false;
 
-      public void AppendTo(IDataModel model, StringBuilder builder, int start, int length, bool deep) {
+      public void AppendTo(IDataModel model, StringBuilder builder, int start, int length, int depth) {
          for (int i = 0; i < length; i++) {
             var index = i + start;
             if (index < Start) continue;

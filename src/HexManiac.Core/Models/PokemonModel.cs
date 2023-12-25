@@ -2,6 +2,7 @@
 using HavenSoft.HexManiac.Core.Models.Runs;
 using HavenSoft.HexManiac.Core.Models.Runs.Factory;
 using HavenSoft.HexManiac.Core.Models.Runs.Sprites;
+using HavenSoft.HexManiac.Core.ViewModels;
 using HavenSoft.HexManiac.Core.ViewModels.DataFormats;
 using HavenSoft.HexManiac.Core.ViewModels.Visitors;
 using System;
@@ -109,7 +110,9 @@ namespace HavenSoft.HexManiac.Core.Models {
       private readonly ThreadSafeDictionary<string, ValidationList> lists = new ThreadSafeDictionary<string, ValidationList>();
 
       private readonly Singletons singletons;
-      private readonly bool showRawIVByteForTrainer, devMode;
+      private readonly bool devMode;
+
+      public bool ShowRawIVByteForTrainer { get; protected set; }
 
       #region Pointer destination-to-source caching, for faster pointer search during initial load
 
@@ -174,8 +177,8 @@ namespace HavenSoft.HexManiac.Core.Models {
       public PokemonModel(byte[] data, StoredMetadata metadata = null, Singletons singletons = null, bool devMode = false) : base(data) {
          this.singletons = singletons;
          this.devMode = devMode;
-         showRawIVByteForTrainer = metadata?.ShowRawIVByteForTrainer ?? false;
-         this.FormatRunFactory = new FormatRunFactory(showRawIVByteForTrainer);
+         ShowRawIVByteForTrainer = metadata?.ShowRawIVByteForTrainer ?? false;
+         this.FormatRunFactory = new FormatRunFactory(ShowRawIVByteForTrainer);
          BuildDestinationToSourceCache(data);
 
          // if we have a subclass, expect the subclass to do this when it's ready.
@@ -331,8 +334,10 @@ namespace HavenSoft.HexManiac.Core.Models {
 
          var changedLocations = new HashSet<int>();
 
+         var isCFRU = HardcodeTablesModel.GetIsCFRU(this);
          foreach (var reference in referenceTables) {
             if (reference.Address + 4 > Count) continue;
+            if (isCFRU && HardcodeTablesModel.CfruIgnoreTables.Contains(reference.Name)) continue;
             var destination = base.ReadPointer(reference.Address) - reference.Offset;
             if (!anchorForAddress.ContainsKey(destination) && !addressForAnchor.ContainsKey(reference.Name)) {
                ApplyAnchor(this, noChange, destination, "^" + reference.Name + reference.Format, allowAnchorOverwrite: true);
@@ -359,7 +364,9 @@ namespace HavenSoft.HexManiac.Core.Models {
             addressForAnchor[reference.Name] = destination;
 
             // update the run, if the new one can drop-in replace the old one. Used for updating field names or general format
-            if (existingRun.Start == replacementRun.Start && existingRun.Length <= replacementRun.Length && existingRun.FormatString != replacementRun.FormatString) {
+            var newLengthReasonable = existingRun.Length <= replacementRun.Length || AllowShorterLength(reference.Name);
+            var sameStartAddress = existingRun.Start == replacementRun.Start;
+            if (sameStartAddress && newLengthReasonable && existingRun.FormatString != replacementRun.FormatString) {
                ObserveAnchorWritten(noChange, reference.Name, replacementRun);
                changedLocations.Add(destination);
             }
@@ -421,7 +428,7 @@ namespace HavenSoft.HexManiac.Core.Models {
                if (runs[i] is ITilemapRun tilemap) {
                   var format = tilemap.Format;
                   if (format.MatchingTileset != anchor) continue;
-                  tilemap = tilemap.Duplicate(new TilemapFormat(format.BitsPerPixel, format.TileWidth, format.TileHeight, reference.Name, format.TilesetTableMember));
+                  tilemap = tilemap.Duplicate(new TilemapFormat(format.BitsPerPixel, format.TileWidth, format.TileHeight, reference.Name, format.TilesetTableMember, format.AllowLengthErrors));
                   runs[i] = tilemap;
                }
 
@@ -705,6 +712,13 @@ namespace HavenSoft.HexManiac.Core.Models {
          // move utility changes the format of moves.levelup: pointer is now to a series of 4-byte tokens
          if (format.Contains(" level:]!FFFFFFFF>]")) return true;
 
+         return false;
+      }
+
+      private bool AllowShorterLength(string name) {
+         if (this.IsEmerald()) {
+            return name == HardcodeTablesModel.OverworldSprites;
+         }
          return false;
       }
 
@@ -1213,7 +1227,7 @@ namespace HavenSoft.HexManiac.Core.Models {
                   // special case: use the override methods to handle inner-pointers
                   destinationTable = destinationTable.RemoveInnerSource(originalStart);
                   destinationRun = destinationTable.AddSourcePointingWithinRun(movedStart);
-               } else if (destinationRun.PointerSources.Contains(originalStart)) { // only add it if it previously pointed to the start of the run
+               } else if (destinationRun.PointerSources != null && destinationRun.PointerSources.Contains(originalStart)) { // only add it if it previously pointed to the start of the run
                   destinationRun = destinationRun.RemoveSource(originalStart);
                   destinationRun = destinationRun.MergeAnchor(new SortedSpan<int>(movedStart));
                }
@@ -1355,7 +1369,9 @@ namespace HavenSoft.HexManiac.Core.Models {
             changeToken.AddRun(runs[index]);
          } else if (index < 0) {
             // the pointer points to a location between existing runs
-            IFormattedRun newRun = new NoInfoRun(destination, new SortedSpan<int>(start));
+            var sources = new SortedSpan<int>(start);
+            sources = sources.Add(SearchForPointersInTables(changeToken, destination));
+            IFormattedRun newRun = new NoInfoRun(destination, sources);
             if (includeFormatting) {
                UpdateNewRunFromPointerFormat(ref newRun, segment as ArrayRunPointerSegment, segments, parentIndex, changeToken);
             }
@@ -1462,7 +1478,7 @@ namespace HavenSoft.HexManiac.Core.Models {
                }
             }
             tableStrategy.UpdateNewRunFromPointerFormat(this, token, segment, segments, parentIndex, ref run);
-         } else {
+         } else if (strategy != null) {
             strategy.UpdateNewRunFromPointerFormat(this, token, segment.Name, segments, parentIndex, ref run);
          }
       }
@@ -1678,7 +1694,8 @@ namespace HavenSoft.HexManiac.Core.Models {
          if (FreeSpaceStart != 0) start = FreeSpaceStart;
          if (start < EarliestAllowedAnchor) start = EarliestAllowedAnchor;
          minimumLength += 0x40; // make sure there's plenty of room after, so that we're not in the middle of some other data set
-         var alignment = 0x40;
+         var alignment = Math.Max(4, FreeSpaceBuffer);
+         while (alignment % 4 != 0) alignment++;
          lock (threadlock) {
             while (start < RawData.Length - minimumLength) {
                // catch the currentRun up to where we are
@@ -1993,7 +2010,10 @@ namespace HavenSoft.HexManiac.Core.Models {
             return;
          }
 
-         // case 3: unnamed anchor and we want to keep the pointers
+         // case 3: unnamed anchor is a constant and we've been asked not to touch constants
+         if (run is WordRun && changeToken.DoNotClearConstants) return;
+
+         // case 4: unnamed anchor and we want to keep the pointers
          // delete the content, but leave the anchor and pointers to it: we don't want to lose track of the pointers that point here.
          runIndex = BinarySearch(run.Start);
          changeToken.RemoveRun(run);
@@ -2049,7 +2069,7 @@ namespace HavenSoft.HexManiac.Core.Models {
 
          // the only run that is allowed to exist with nothing pointing to it and no name is a pointer run.
          // if it's any other kind of run with no name and no pointers to it, remove it.
-         if (newAnchorRun.PointerSources.Count == 0 && !anchorForAddress.ContainsKey(newAnchorRun.Start) && !(newAnchorRun is PointerRun)) {
+         if (newAnchorRun.PointerSources.Count == 0 && !anchorForAddress.ContainsKey(newAnchorRun.Start) && !(newAnchorRun is PointerRun) && changeToken is not TransientModelDelta) {
             if (anchorRun.Start <= start && anchorRun.Start + anchorRun.Length > start) {
                // calling ClearFormat would try to clear the element we're already removing
                // no need to do that: This element should get removed higher up the callstack.
@@ -2134,7 +2154,13 @@ namespace HavenSoft.HexManiac.Core.Models {
                      if (offsetPointerRun.Offset > 0) offset = "+" + offsetPointerRun.Offset.ToString("X6");
                      if (offsetPointerRun.Offset < 0) offset = "-" + (-offsetPointerRun.Offset).ToString("X6");
                   }
-                  text.Append($"<{anchorName}{offset}> ");
+                  if (deep && GetNextRun(destination) is IAppendToBuilderRun child) {
+                     text.Append("@{ ");
+                     child.AppendTo(this, text, destination, child.Length, deep ? 10 : 0);
+                     text.Append("@} ");
+                  } else {
+                     text.Append($"<{anchorName}{offset}> ");
+                  }
                   start += 4;
                   length -= 4;
                } else if (run is NoInfoRun || run is IScriptStartRun) {
@@ -2142,7 +2168,7 @@ namespace HavenSoft.HexManiac.Core.Models {
                   start += 1;
                   length -= 1;
                } else if (run is IAppendToBuilderRun atbRun) {
-                  atbRun.AppendTo(this, text, start, length, deep);
+                  atbRun.AppendTo(this, text, start, length, deep ? 10 : 0);
                   text.Append(" ");
                   length -= run.Start + run.Length - start;
                   start = run.Start + run.Length;
@@ -2382,7 +2408,7 @@ namespace HavenSoft.HexManiac.Core.Models {
                FreeSpaceSearch = FreeSpaceStart,
                FreeSpaceBuffer = FreeSpaceBuffer,
                NextExportID = NextExportID,
-               ShowRawIVByteForTrainer = showRawIVByteForTrainer,
+               ShowRawIVByteForTrainer = ShowRawIVByteForTrainer,
             });
       }
 
@@ -2434,7 +2460,27 @@ namespace HavenSoft.HexManiac.Core.Models {
          return results;
       }
 
-      private SortedSpan<int> SpanFromCache(ModelDelta token, int[] destinations) {
+      private SortedSpan<int> SearchForPointersInTables(ModelDelta changeToken, int address){
+         if (sourcesForDestinations != null || changeToken is TransientModelDelta) return SortedSpan<int>.None; // no need to search through tables if we're in a transient or doing initial load
+         var results = new List<int>();
+         lock (threadlock) {
+            foreach (var run in All<ITableRun>()) {
+               int offset = 0;
+               foreach (var seg in run.ElementContent) {
+                  if (seg.Type == ElementContentType.Pointer) {
+                     for (int i = 0; i < run.ElementCount; i++) {
+                        var source = run.Start + i * run.ElementLength + offset;
+                        if (ReadPointer(source) == address) results.Add(source);
+                     }
+                  }
+                  offset += seg.Length;
+               }
+            }
+         }
+         return new SortedSpan<int>(results);
+      }
+
+      private SortedSpan<int> SpanFromCache(ModelDelta token, params int[] destinations) {
          var results = SortedSpan<int>.None;
          foreach (var destination in destinations) {
             if (sourcesForDestinations.TryGetValue(destination, out var sources)) results = results.Add(sources);
@@ -2447,8 +2493,14 @@ namespace HavenSoft.HexManiac.Core.Models {
                i -= 1;
             } else if (newRun != null) {
                // NOTE don't ObserveRunWritten here! That will automatically add not only the Pointer, but also an anchor. Example: Unbound-bt-d1.3.1, it causes a conflict where an anchor is added into the type names _while_ we're adding the table that contains that inner anchor.
-               var index = ~BinarySearch(newRun.Start);
-               InsertIndex(index, newRun);
+               var index = BinarySearch(newRun.Start);
+               if (index >= 0) {
+                  token.RemoveRun(runs[index]);
+                  runs[index] = newRun;
+               } else {
+                  index = ~index;
+                  InsertIndex(index, newRun);
+               }
                token.AddRun(newRun);
             }
          }
@@ -2463,7 +2515,7 @@ namespace HavenSoft.HexManiac.Core.Models {
       /// This method can be called from a parellel context, so it doesn't make any changes to the runs collection.
       /// Instead, it returns a new pointer run if one needs to be added.
       ///
-      /// The read-only nature of the method means taht it shouln't lock and can be called in parallel,
+      /// The read-only nature of the method means that it shouln't lock and can be called in parallel,
       /// but the caller is in charge of making sure the run collection doesn't change while this is working.
       /// </summary>
       private bool TryMakePointerAtAddress(ModelDelta changeToken, int address, bool ignoreNoInfoPointers, out PointerRun runToAdd) {
@@ -2475,10 +2527,7 @@ namespace HavenSoft.HexManiac.Core.Models {
             if (runs[index] is PointerRun) return true;
             if (runs[index] is ArrayRun arrayRun && arrayRun.ElementContent[0].Type == ElementContentType.Pointer) return true;
             if (runs[index] is NoInfoRun) {
-               var pointerRun = new PointerRun(address, runs[index].PointerSources);
-               changeToken.RemoveRun(runs[index]);
-               changeToken.AddRun(pointerRun);
-               runs[index] = pointerRun;
+               runToAdd = new PointerRun(address, runs[index].PointerSources);
                return true;
             }
             return false;
@@ -2679,7 +2728,7 @@ namespace HavenSoft.HexManiac.Core.Models {
                   MoveRun(changeToken, sRun, 1, newStart + sRun.Start - run.Start);
                } else {
                   // clear format of any constants/pointers/streams that is considered part of the script
-                  ClearFormat(changeToken, nextRun.Start, nextRun.Length);
+                  ClearFormatAndAnchors(changeToken, nextRun.Start, nextRun.Length);
                }
             }
             while (true);

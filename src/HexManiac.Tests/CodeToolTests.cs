@@ -44,6 +44,7 @@ namespace HavenSoft.HexManiac.Tests {
       public CodeToolTests() {
          Model.LoadMetadata(BaseModel.GetDefaultMetadatas().First()); // load default script-related lists, like script_compare
          SetFullModel(0xFF);
+         Tool.IsSelected = true;
       }
 
       [Fact]
@@ -281,10 +282,10 @@ namespace HavenSoft.HexManiac.Tests {
             0x00, 0b11110_000, 0x01, 0b11111_000, // bl round4(pc+4+2*1)
             0x00, 0xBD,            // pop {pc}
             // the magic part
-            0b11, 0xB4,            // push {r0-r1}
-            0x01, 0b01001_001,     // ldr r1, pc+4+4* 1
-            0x01, 0b10010_001,     // str r1, sp+4*   1
-            0b10, 0xBD,            // pop {pc, r1}
+            0b11, 0xB4,            // push {r0, r1}
+            0x01, 0b01001_000,     // ldr r0, pc+4+4* 1
+            0x01, 0b10010_000,     // str r0, sp+4*   1
+            0b01, 0xBD,            // pop {r0, pc}
             0x01, 0x00, 0xC0, 0x08 // .word 0xC00000
          };
 
@@ -471,10 +472,11 @@ pokemart <auto>
 
          var run = Model.GetNextRun(6);
          Assert.IsAssignableFrom<ITableRun>(run);
-         Assert.Equal(1, Model.ReadMultiByteValue(6, 2));
-         Assert.Equal(2, Model.ReadMultiByteValue(8, 2));
-         Assert.Equal(3, Model.ReadMultiByteValue(10, 2));
-         Assert.Equal(0, Model.ReadMultiByteValue(12, 2));
+         Assert.Equal(0, Model.ReadMultiByteValue(6, 2)); // alignment
+         Assert.Equal(1, Model.ReadMultiByteValue(8, 2));
+         Assert.Equal(2, Model.ReadMultiByteValue(10, 2));
+         Assert.Equal(3, Model.ReadMultiByteValue(12, 2));
+         Assert.Equal(0, Model.ReadMultiByteValue(14, 2));
       }
 
       [Fact]
@@ -594,7 +596,7 @@ You said no!
          ViewPort.Edit("19 00 00 00 ");
          Tool.Mode = CodeMode.AnimationScript;
          ViewPort.Goto.Execute(0);
-         var help = Tool.AnimationScriptParser.GetHelp(ViewPort.Model, new HelpContext("playsewithpan mus_dummy 0", 25));
+         var help = Tool.AnimationScriptParser.GetHelp(ViewPort.Model, new HelpContext("playsewithpan mus_dummy ", 24));
 
          Assert.NotNull(help);
       }
@@ -847,6 +849,47 @@ label2:;goto <000050>;end";
          Assert.Equal(expected, actual);
       }
 
-      // TODO test that we get an error (not an exception) if we do auto on an unformatted pointer
+      [Fact]
+      public void InvalidCommand_Compile_HasError() {
+         EventScript = "not_a_command";
+
+         Assert.True(Tool.Contents[0].HasError);
+      }
+
+      [Fact]
+      public void FireRed_ShowMoney_Reserve4Bytes() {
+         SetGameCode("BPRE0");
+         Tool.ScriptParser.RefreshGameHash(Model);
+
+         var script = "if1 0 <section2>;showmoney 5 6 7;section2:;end".Replace(";", Environment.NewLine);
+         var bytes = Tool.ScriptParser.Compile(Token, Model, 0, ref script, out var _);
+
+         Assert.Equal(10, bytes[2]);
+      }
+
+      [Fact]
+      public void ScriptStartsWithEnd_ScriptContainsPointer_PointerFormatted() {
+         EventScript = "end;if.yes.goto <section1>;end;section1:;end";
+         var run = Model.GetNextRun(1);
+         Assert.Equal(8, run.Start);
+         Assert.IsType<PointerRun>(run);
+      }
+
+      [Fact]
+      public void ScriptGotoBeforeScriptStarts_Reload_IncludesSubScript() {
+         EventScript = "end";
+         ViewPort.Goto.Execute(0x10);
+
+         EventScript = "if.yes.goto <section1>;end;section1:;if.yes.goto <000000>;end";
+
+         Assert.Equal(2, Tool.Contents.Count);
+      }
+
+      [Fact]
+      public void Compare_SingleEquals_CompilesToDoubleEquals() {
+         EventScript = "if.compare.goto 0x4000 = 7 <720010>";
+         var expected = "21 00 40 07 00 06 01 10 00 72 08 02".ToByteArray();
+         Assert.All(expected.Length.Range(), i => Assert.Equal(expected[i], Model[i]));
+      }
    }
 }

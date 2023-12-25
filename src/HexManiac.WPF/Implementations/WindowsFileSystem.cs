@@ -63,11 +63,17 @@ namespace HavenSoft.HexManiac.WPF.Implementations {
       public (short[] image, int width) CopyImage {
          get {
             if (Clipboard.ContainsImage()) {
-               var bitmapSource = Clipboard.GetImage();
-               return DecodeImage(bitmapSource);
-            } else {
-               return (default, default);
+               try {
+                  var bitmapSource = Clipboard.GetImage();
+                  return DecodeImage(bitmapSource);
+               } catch (COMException) {
+                  // something else was using the clipboard... couldn't copy
+                  var window = (MainWindow)Application.Current.MainWindow;
+                  window.ViewModel.ErrorMessage = "Could not copy";
+               }
             }
+
+            return (default, default);
          }
          set {
             var frame = EncodeImage(value.image, value.width);
@@ -449,6 +455,29 @@ namespace HavenSoft.HexManiac.WPF.Implementations {
             ShowCustomMessageBox($"Error: {io.Message}.", false);
             return default;
          }
+      }
+
+      public bool TryLoadIndexedImage(ref string filename, out int[,] image, out IReadOnlyList<short> palette) {
+         (image, palette) = (null, null);
+
+         if (filename == null) {
+            var dialog = new OpenFileDialog { Filter = CreateFilterFromOptions("Image Files", "png") };
+            var result = dialog.ShowDialog();
+            if (result != true) return false;
+            filename = dialog.FileName;
+         }
+
+         try {
+            (image, palette) = IndexedPng.Load(filename);
+         } catch (UnauthorizedAccessException) {
+            return false;
+         } catch (IOException io) {
+            return false;
+         } catch (PngArgumentException e) {
+            return false;
+         }
+
+         return true;
       }
 
       private static (short[] image, int width) DecodeImage(BitmapSource frame) {

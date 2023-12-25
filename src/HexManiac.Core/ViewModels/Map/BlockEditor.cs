@@ -327,10 +327,11 @@ namespace HavenSoft.HexManiac.Core.ViewModels.Map {
    public class BlockEditor : ViewModelCore {
       private readonly ChangeHistory<ModelDelta> history;
       private readonly MapTutorialsViewModel tutorials;
-      private readonly short[][] palettes;
-      private readonly int[][,] tiles;
-      private readonly byte[][] blocks;
-      private readonly byte[][] blockAttributes;
+      private readonly IDataModel model;
+      private short[][] palettes;
+      private int[][,] tiles;
+      private byte[][] blocks;
+      private byte[][] blockAttributes;
       private readonly IDictionary<IPixelViewModel, int> indexForTileImage;
       private readonly CanvasPixelViewModel[] images;
 
@@ -395,6 +396,10 @@ namespace HavenSoft.HexManiac.Core.ViewModels.Map {
             movementPermissions.Add($"{start + 2:X2} - Elevation {i} Unused");
             movementPermissions.Add($"{start + 3:X2} - Elevation {i} Unused");
          }
+         movementPermissions.Add("38 - No Use");
+         movementPermissions.Add("39 - No Use");
+         movementPermissions.Add("3A - No Use");
+         movementPermissions.Add("3B - No Use");
          movementPermissions.Add("3C - Above/Below");
          movementPermissions.Add("3D - No Use");
          movementPermissions.Add("3E - No Use");
@@ -417,10 +422,12 @@ namespace HavenSoft.HexManiac.Core.ViewModels.Map {
       public BlockEditor(ChangeHistory<ModelDelta> history, IDataModel listSource, MapTutorialsViewModel tutorials, short[][] palettes, int[][,] tiles, byte[][] blocks, byte[][] blockAttributes) {
          this.history = history;
          this.tutorials = tutorials;
+         this.model = listSource;
          this.palettes = palettes;
          this.tiles = tiles;
          this.blocks = blocks;
          this.blockAttributes = blockAttributes;
+         hasTerrainAndEncounter = blockAttributes[0].Length > 2;
          images = new CanvasPixelViewModel[8];
          indexForTileImage = new Dictionary<IPixelViewModel, int>();
          if (listSource.TryGetList("MapAttributeBehaviors", out var behaviors)) behaviors.ForEach(BehaviorOptions.Add);
@@ -545,7 +552,7 @@ namespace HavenSoft.HexManiac.Core.ViewModels.Map {
       }
 
       public void DrawOnTile(IPixelViewModel tile) {
-         if (!showTiles) return;
+         if (!showTiles || tile == null) return;
          var index = indexForTileImage[tile];
          LzTilemapRun.WriteTileData(blocks[blockIndex], index, drawPalette, drawFlipH, drawFlipV, drawTile);
          var newImage = BlocksetModel.Read(blocks[blockIndex], index, tiles, palettes);
@@ -715,7 +722,7 @@ namespace HavenSoft.HexManiac.Core.ViewModels.Map {
          var pixelData = new short[8 * 8 * TilesPerRow * tileLines];
          for (int i = 0; i < pixelData.Length; i++) pixelData[i] = short.MinValue;
          var render = new CanvasPixelViewModel(8 * 16, 8 * 16 * 4, pixelData) { SpriteScale = 3, Transparent = short.MinValue };
-         var palette = palettes[paletteIndex];
+         var palette = SpriteTool.CreatePaletteWithUniqueTransparentColor(palettes[paletteIndex]);
          for (int y = 0; y < 64; y++) {
             for (int x = 0; x < 16; x++) {
                var tile = new ReadonlyPixelViewModel(8, 8, SpriteTool.Render(tiles[y * 16 + x], palette, 0, 0), palette[0]);
@@ -729,10 +736,22 @@ namespace HavenSoft.HexManiac.Core.ViewModels.Map {
       }
 
       private void UpdateDrawTileRender() {
-         var palette = palettes[drawPalette];
+         var palette = SpriteTool.CreatePaletteWithUniqueTransparentColor(palettes[drawPalette]);
          drawTileRender = new CanvasPixelViewModel(8, 8, SpriteTool.Render(tiles[drawTile], palette, 0, 0)) { Transparent = palette[0], SpriteScale = 4 };
          NotifyPropertiesChanged(nameof(DrawTileRender));
       }
+
+      #endregion
+
+      #region Cache
+
+      public void RefreshPaletteCache(short[][] palette) => this.palettes = palette;
+      public void RefreshTileCache(int[][,] tiles) => this.tiles = tiles;
+      public void RefreshBlockCache(byte[][] blocks) {
+         this.blocks = blocks;
+         BlockIndex = blockIndex;
+      }
+      public void RefreshBlockAttributeCache(byte[][] blockAttributes) => this.blockAttributes = blockAttributes;
 
       #endregion
    }

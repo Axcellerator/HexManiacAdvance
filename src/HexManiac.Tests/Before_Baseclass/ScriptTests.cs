@@ -14,11 +14,14 @@ namespace HavenSoft.HexManiac.Tests {
       private readonly ScriptParser battle;
 
       public ScriptTests() {
+         Model.LoadMetadata(BaseModel.GetDefaultMetadatas().First()); // load default script-related lists, like script_compare
          battle = ViewPort.Tools.CodeTool.BattleScriptParser;
+         ViewPort.Tools.CodeTool.IsSelected = true;
       }
 
       [Fact]
       public void DecompiledScriptsContainLabels() {
+         Model.ClearFormat(new(), 0, Model.Count);
          var script = Script("jumpiftype 0 0 <0007>", "end");
          var code = battle.Compile(ViewPort.CurrentChange, Model, 0, ref script, out var _);
          Array.Copy(code, Model.RawData, code.Length);
@@ -27,7 +30,7 @@ namespace HavenSoft.HexManiac.Tests {
          var lines = battle.Parse(Model, 0, code.Length).SplitLines();
 
          Assert.Equal<string>(new string[] {
-            "  jumpiftype 0 0 <section0>",
+            "  jumpiftype target 0 <section0>",
             "",
             "section0: # 000007",
             "  end",
@@ -202,7 +205,7 @@ end
 
       [Fact]
       public void LoadPointerCommand_StartsWithWhitespace_StillGetHelp() {
-         Assert.NotEmpty(ViewPort.Tools.CodeTool.ScriptParser.GetHelp(Model, new("  loadpointer", 13)));
+         Assert.NotEmpty(ViewPort.Tools.CodeTool.ScriptParser.GetHelp(Model, new("  loadpointer ", 14)));
       }
 
       [Fact]
@@ -575,6 +578,7 @@ Script:
 
       [Fact]
       public void TablePointsToScript_EditThenUndo_NoNewAnchors() {
+         Model.ClearFormat(new(), 0, Model.Count);
          ViewPort.Edit("<020> @00 ^table[pointer<`xse`>]1 ");
 
          ViewPort.Edit("<030> ");
@@ -592,11 +596,12 @@ Script:
          ViewPort.ChangeHistory.TagAsSaved();
 
          ViewPort.SelectionStart = new(0, 1);
-         ViewPort.SelectionStart = new(0, 0); // should load as an auto
+         ViewPort.SelectionStart = new(0, 0);
          ViewPort.Tools.CodeTool.Contents[0].Content += " ";
 
-         var text = Model.TextConverter.Convert(Model, 9, 5); // should move the text based on the auto
+         var text = Model.TextConverter.Convert(Model, 0xA, 5); // should not move, there's 1 unused byte between
          Assert.Equal("\"text\"", text);
+         Assert.True(ViewPort.ChangeHistory.IsSaved);
       }
 
       [Fact]
@@ -611,6 +616,17 @@ Script:
          var table = (ITableRun)Model.GetNextRun(0);
          Assert.Equal(0, table.Start);
          Assert.Equal("86 00 00 00 08 02".ToByteArray(), Model.Skip(0x10).Take(6).ToArray());
+      }
+
+      [Fact]
+      public void NullPointer_Decompile_Null() {
+         ViewPort.Edit("67 00 00 00 00 66 6D 03 ");
+
+         ViewPort.Tools.CodeTool.Mode = CodeMode.Script;
+         ViewPort.Goto.Execute(0);
+         var content = ViewPort.Tools.CodeTool.Contents[0].Content.SplitLines();
+
+         Assert.Equal("preparemsg <null>", content[0].Trim());
       }
 
       private string Script(params string[] lines) => lines.CombineLines();

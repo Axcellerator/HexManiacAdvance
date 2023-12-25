@@ -1,4 +1,5 @@
-﻿using HavenSoft.HexManiac.Core.Models.Runs;
+﻿using HavenSoft.HexManiac.Core.Models.Code;
+using HavenSoft.HexManiac.Core.Models.Runs;
 using HavenSoft.HexManiac.Core.ViewModels;
 using System;
 using System.Collections;
@@ -117,6 +118,26 @@ namespace HavenSoft.HexManiac.Core {
             throw new InvalidOperationException($"Enumerable did not contain any {typeof(T)} elements.");
       }
 
+      public static int MatchPairIndex<T>(this ReadOnlySpan<T> collection, T start, T end) where T : IEquatable<T> {
+         var started = false;
+         var depth = 0;
+         int index = -1;
+         foreach (var c in collection) {
+            index += 1;
+            if (!c.Equals(start) && !c.Equals(end)) continue;
+            if (c.Equals(start)) {
+               started = true;
+               depth += 1;
+               continue;
+            } else {
+               if (!started) continue;
+               depth -= 1;
+               if (depth == 0) return index;
+            }
+         }
+         return -1;
+      }
+
       public static bool IsNullOrEmpty<T>(this IEnumerable<T> list) {
          if (list == null) return true;
          return !list.Any();
@@ -179,6 +200,17 @@ namespace HavenSoft.HexManiac.Core {
       public static string[] Split(this string self, string token) => self.Split(new[] { token }, StringSplitOptions.None);
 
       public static string[] SplitLines(this string self) => self.Split(new[] { Environment.NewLine, "\n" }, StringSplitOptions.None);
+
+      public static string[] SplitLast(this string self, char c) {
+         var result = new[] { self, string.Empty };
+         for (int i = self.Length - 1; i >= 0; i--) {
+            if (self[i] != c) continue;
+            result[0] = self.Substring(0, i);
+            result[1] = self.Substring(i + 1);
+            break;
+         }
+         return result;
+      }
 
       public static string CombineLines(this IReadOnlyList<string> lines) => lines.Aggregate((a, b) => a + Environment.NewLine + b);
 
@@ -250,27 +282,35 @@ namespace HavenSoft.HexManiac.Core {
       /// Measures the amount of 'skipped letters' in a match
       /// </summary>
       public static int SkipCount(this string full, string partial) {
-         int j = 0, skipCount = 0;
-         partial = partial.ToUpper();
+         if (partial.Length < 2) return 0;
+         int bestSkipCount = full.Length;
 
-         for (int i = 0; i < partial.Length; i++) {
-            var testPartial = char.ToUpperInvariant(partial[i]);
-            if (partial[i] == 'é') testPartial = 'E';
-            if (partial[i] == 'á') testPartial = 'A';
-            while (j < full.Length) {
-               var testFull = char.ToUpperInvariant(full[j]);
-               if (full[j] == 'é') testFull = 'E';
-               if (full[j] == 'á') testFull = 'A';
-               j++;
-               if (testFull == testPartial) break;
-               if (testFull == partial[0] && i == 1) skipCount = 0;
-               if (j == full.Length) return skipCount;
-               if (i > 0) skipCount++;
-            }
-            if (j == full.Length) return skipCount;
+         char compare(char letter) {
+            var c = char.ToUpperInvariant(letter);
+            if (letter == 'é') c = 'E';
+            if (letter == 'á') c = 'A';
+            return c;
          }
 
-         return skipCount;
+         var startPartial = compare(partial[0]);
+         for (int startPoint = 0; startPoint <= full.Length - partial.Length; startPoint++) {
+            if (compare(full[startPoint]) != startPartial) continue;
+            int skipCount = 0, k = 1;
+            var currentPartial = compare(partial[1]);
+            for (int j = startPoint + 1; j < full.Length; j++) {
+               if (compare(full[j]) == currentPartial) {
+                  k += 1;
+                  if (k == partial.Length) break;
+                  currentPartial = compare(partial[k]);
+               } else {
+                  skipCount += 1;
+               }
+            }
+            if (k < partial.Length) continue;
+            bestSkipCount = Math.Min(bestSkipCount, skipCount);
+            if (bestSkipCount == 0) return 0;
+         }
+         return bestSkipCount;
       }
 
       public static int IndexOfPartial(this IReadOnlyList<string> names, string input) {
@@ -278,21 +318,10 @@ namespace HavenSoft.HexManiac.Core {
          var matchIndex = names.IndexOf(input);
          if (matchIndex != -1) return matchIndex;
 
-         // no perfect match found. How about a substring match?
-         var match = names.FirstOrDefault(name => name.Contains(input));
-         if (match != null) names.IndexOf(match);
-
-         // well how about just "all the characters are in the right order"?
-         for (var i = 0; i < names.Count; i++) {
-            if (names[i].MatchesPartial(input)) return i;
-         }
-
-         // last ditch effort: "all the letters/numbers are in the right order"
-         for (var i = 0; i < names.Count; i++) {
-            if (names[i].MatchesPartial(input, true)) return i;
-         }
-
-         return -1;
+         var partialList = names.Count.Range().Where(i => names[i].MatchesPartial(input)).ToList();
+         partialList = ScriptParser.SortOptions(partialList, input, i => names[i]).ToList();
+         if (partialList.Count == 0) return -1;
+         return partialList[0];
       }
 
       public static IEnumerable<string> EnumerateOrders(IReadOnlyList<string> parts) {

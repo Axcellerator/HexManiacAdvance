@@ -26,7 +26,6 @@ using static HavenSoft.HexManiac.Core.ICommandExtensions;
 namespace HavenSoft.HexManiac.Core.ViewModels {
    public class EditorViewModel : ViewModelCore, IEnumerable<ITabContent>, INotifyCollectionChanged {
       public const string ApplicationName = "HexManiacAdvance";
-      private const int MaxReasonableResults = 400; // limit for performance reasons
 
       private readonly IFileSystem fileSystem;
       private readonly IWorkDispatcher workDispatcher;
@@ -133,7 +132,7 @@ namespace HavenSoft.HexManiac.Core.ViewModels {
 
       public MapTutorialsViewModel MapTutorials { get; } = new();
 
-      private GotoControlViewModel gotoViewModel = new GotoControlViewModel(null, null, false);
+      private GotoControlViewModel gotoViewModel = new GotoControlViewModel(null, null, null, false);
       public GotoControlViewModel GotoViewModel {
          get => gotoViewModel;
          private set {
@@ -230,7 +229,9 @@ namespace HavenSoft.HexManiac.Core.ViewModels {
       }
 
       public void RunQuickEdit(IQuickEditItem edit) {
-         var viewPort = tabs[SelectedIndex] as IViewPort;
+         var tab = tabs[SelectedIndex];
+         if (tab is MapEditorViewModel map) tab = map.ViewPort;
+         var viewPort = tab as IViewPort;
          gotoViewModel.ControlVisible = false;
          var errorTask = edit.Run(viewPort);
          errorTask.ContinueWith(ContinueQuickEdit, TaskContinuationOptions.ExecuteSynchronously);
@@ -423,6 +424,9 @@ namespace HavenSoft.HexManiac.Core.ViewModels {
       public int MaximumDiffSegments { get => maxDiffSegCount; set => Set(ref maxDiffSegCount, value.LimitToRange(1, 10000)); }
       public bool HideDiffPointerChanges { get; set; }
 
+      private int maxSearchResults = 400;
+      public int MaximumSearchResults { get => maxSearchResults; set => Set(ref maxSearchResults, value.LimitToRange(1, 10000)); }
+
       public IToolTrayViewModel Tools => (SelectedTab as IViewPort)?.Tools;
 
       public IReadOnlyList<IQuickEditItem> QuickEditsPokedex { get; }
@@ -521,6 +525,7 @@ namespace HavenSoft.HexManiac.Core.ViewModels {
          QuickEditsMisc = new List<IQuickEditItem> {
             new RomOverview(),
             new DecapNames(),
+            new ApplyCFRUPatch { Editor = this },
          };
 
          tabs = new List<ITabContent>();
@@ -528,24 +533,24 @@ namespace HavenSoft.HexManiac.Core.ViewModels {
 
          ImplementCommands();
 
-         copy = CreateWrapperForSelected(tab => tab.Copy);
-         deepCopy = CreateWrapperForSelected(tab => tab.DeepCopy);
+         copy = CreateWrapperForSelected(tab => tab.Copy, true);
+         deepCopy = CreateWrapperForSelected(tab => tab.DeepCopy, true);
          diffSinceLastSave = CreateWrapperForSelected(tab => tab.Diff);
-         delete = CreateWrapperForSelected(tab => tab.Clear);
-         selectAll = CreateWrapperForSelected(tab => tab.SelectAll);
+         delete = CreateWrapperForSelected(tab => tab.Clear, true);
+         selectAll = CreateWrapperForSelected(tab => tab.SelectAll, true);
          save = CreateWrapperForSelected(tab => tab.Save);
          saveAs = CreateWrapperForSelected(tab => tab.SaveAs);
          exportBackup = CreateWrapperForSelected(tab => tab.ExportBackup);
          close = CreateWrapperForSelected(tab => tab.Close);
-         undo = CreateWrapperForSelected(tab => tab.Undo);
-         redo = CreateWrapperForSelected(tab => tab.Redo);
-         back = CreateWrapperForSelected(tab => tab.Back);
-         forward = CreateWrapperForSelected(tab => tab.Forward);
-         resetAlignment = CreateWrapperForSelected(tab => tab.ResetAlignment);
-         displayAsText = CreateWrapperForSelected(tab => (tab as ViewPort)?.Shortcuts.DisplayAsText);
-         displayAsEventScript = CreateWrapperForSelected(tab => (tab as ViewPort)?.Shortcuts.DisplayAsEventScript);
-         displayAsSprite = CreateWrapperForSelected(tab => (tab as ViewPort)?.Shortcuts.DisplayAsSprite);
-         displayAsColorPalette = CreateWrapperForSelected(tab => (tab as ViewPort)?.Shortcuts.DisplayAsColorPalette);
+         undo = CreateWrapperForSelected(tab => tab.Undo, true);
+         redo = CreateWrapperForSelected(tab => tab.Redo, true);
+         back = CreateWrapperForSelected(tab => tab.Back, true);
+         forward = CreateWrapperForSelected(tab => tab.Forward, true);
+         resetAlignment = CreateWrapperForSelected(tab => tab.ResetAlignment, true);
+         displayAsText = CreateWrapperForSelected(tab => (tab as ViewPort)?.Shortcuts.DisplayAsText, true);
+         displayAsEventScript = CreateWrapperForSelected(tab => (tab as ViewPort)?.Shortcuts.DisplayAsEventScript, true);
+         displayAsSprite = CreateWrapperForSelected(tab => (tab as ViewPort)?.Shortcuts.DisplayAsSprite, true);
+         displayAsColorPalette = CreateWrapperForSelected(tab => (tab as ViewPort)?.Shortcuts.DisplayAsColorPalette, true);
 
          saveAll = CreateWrapperForAll(tab => tab.Save);
          closeAll = CreateWrapperForAll(tab => tab.Close);
@@ -592,6 +597,8 @@ namespace HavenSoft.HexManiac.Core.ViewModels {
          if (zoomLine != null && int.TryParse(zoomLine.Split('=').Last().Trim(), out var zoomLevel)) ZoomLevel = zoomLevel;
          var maxDiffLine = metadata.FirstOrDefault(line => line.StartsWith("MaximumDiffSegments = "));
          if (maxDiffLine != null && int.TryParse(maxDiffLine.Split('=').Last().Trim(), out var maxDiffs)) MaximumDiffSegments = maxDiffs;
+         var maxSearchResultsLine = metadata.FirstOrDefault(line => line.StartsWith("MaximumSearchResults = "));
+         if (maxDiffLine != null && int.TryParse(maxDiffLine.Split('=').Last().Trim(), out var maxSearchResults)) MaximumSearchResults = maxSearchResults;
 
          var recentFilesLine = metadata.FirstOrDefault(line => line.StartsWith("RecentFiles = ["));
          if (recentFilesLine != null) {
@@ -620,6 +627,7 @@ namespace HavenSoft.HexManiac.Core.ViewModels {
             $"FocusOnGotoShortcuts = {FocusOnGotoShortcuts}",
             $"ZoomLevel = {ZoomLevel}",
             $"MaximumDiffSegments = {MaximumDiffSegments}",
+            $"MaximumSearchResults = {MaximumSearchResults}",
             $"CopyLimit = {Singletons.CopyLimit}",
             $"AnimateScroll = {AnimateScroll}",
             $"AutoAdjustDataWidth = {AutoAdjustDataWidth}",
@@ -720,8 +728,14 @@ namespace HavenSoft.HexManiac.Core.ViewModels {
             }
          };
 
-         paste.CanExecute = arg => SelectedTab is ViewPort;
+         paste.CanExecute = arg => SelectedTab is ViewPort || (SelectedTab is ImageEditorViewModel image && image.Paste.CanExecute(FileSystem));
          paste.Execute = arg => {
+            if (gotoViewModel.ControlVisible) return;
+            if (SelectedTab is ImageEditorViewModel image) {
+               image.Paste.Execute(FileSystem);
+               return;
+            }
+
             var copyText = fileSystem.CopyText;
             // if the paste is long, add whitespace to complete any pasted elements
             if (copyText.Contains(Environment.NewLine) || copyText.Contains(BaseRun.AnchorStart)) {
@@ -1050,7 +1064,6 @@ namespace HavenSoft.HexManiac.Core.ViewModels {
             return;
          }
 
-         SelectedIndex = left;
          leftViewPort.MaxDiffSegmentCount = maxDiffSegCount;
          leftViewPort.HideDiffPointerChanges = HideDiffPointerChanges;
          leftViewPort.Diff.Execute(rightViewPort);
@@ -1070,7 +1083,7 @@ namespace HavenSoft.HexManiac.Core.ViewModels {
          return true;
       }
 
-      private StubCommand CreateWrapperForSelected(Func<ITabContent, ICommand> commandGetter) {
+      private StubCommand CreateWrapperForSelected(Func<ITabContent, ICommand> commandGetter, bool preventIfScreenBlocked = false) {
          var command = new StubCommand {
             CanExecute = arg => {
                if (SelectedIndex < 0) return false;
@@ -1079,6 +1092,7 @@ namespace HavenSoft.HexManiac.Core.ViewModels {
                return innerCommand.CanExecute(fileSystem);
             },
             Execute = arg => {
+               if (preventIfScreenBlocked && gotoViewModel.ControlVisible) return; // don't execute this command while the screen is blocked by the goto panel
                var tab = tabs[SelectedIndex];
                var innerCommand = commandGetter(tab);
                if (innerCommand == null) return;
@@ -1161,7 +1175,7 @@ namespace HavenSoft.HexManiac.Core.ViewModels {
             return;
          }
 
-         if (results.Count > MaxReasonableResults) {
+         if (results.Count > MaximumSearchResults) {
             ErrorMessage = $"Found {results.Count} results: please refine your search.";
             return;
          }
@@ -1186,7 +1200,14 @@ namespace HavenSoft.HexManiac.Core.ViewModels {
                tabs.Remove(tab);
                RemoveContentListeners(tab);
                if (selectedIndex == tabs.Count) SelectedIndex = tabs.Count - 1;
-               CollectionChanged?.Invoke(this, new NotifyCollectionChangedEventArgs(NotifyCollectionChangedAction.Remove, tab, index));
+               try {
+                  CollectionChanged?.Invoke(this, new NotifyCollectionChangedEventArgs(NotifyCollectionChangedAction.Remove, tab, index));
+               } catch (ArgumentOutOfRangeException) {
+                  // in some cases, the collection may have already noticed the change due to UI updates.
+                  // in this situation, the index may be out of range, and we may catch an exception.
+                  // If that happens, just do a hard reset on the collection as a backup.
+                  CollectionChanged?.Invoke(this, new NotifyCollectionChangedEventArgs(NotifyCollectionChangedAction.Reset));
+               }
             }
             UpdateGotoViewModel();
             return;
@@ -1256,10 +1277,21 @@ namespace HavenSoft.HexManiac.Core.ViewModels {
 
       private void UpdateGotoViewModel() {
          GotoViewModel.PropertyChanged -= GotoPropertyChanged;
-         GotoViewModel = new GotoControlViewModel(SelectedTab, workDispatcher, showDevMenu) { ShowAll = !FocusOnGotoShortcuts, Text = GotoViewModel?.Text };
+         var docs = new List<DocLabel>();
+         if (SelectedTab is IEditableViewPort vp) {
+            if (vp.Model.Count >= 0x100 && Singletons.DocReference.TryGetValue(vp.Model.GetGameCode().Substring(0, 4), out var fixedDocs)) docs.AddRange(fixedDocs);
+         }
+
+         GotoViewModel = new GotoControlViewModel(SelectedTab, workDispatcher, docs, showDevMenu) { ShowAll = !FocusOnGotoShortcuts, Text = GotoViewModel?.Text };
          var collection = CreateGotoShortcuts(GotoViewModel);
          if (collection != null) GotoViewModel.Shortcuts = new ObservableCollection<GotoShortcutViewModel>(collection);
          GotoViewModel.PropertyChanged += GotoPropertyChanged;
+         if(SelectedTab is IEditableViewPort vp1 && vp1.Model is BaseModel bm) {
+            var vm = GotoViewModel;
+            vp1.InitializationWorkload.ContinueWith(task => {
+               if (vm == GotoViewModel) vm.UpdateDocs(bm.GenerateDocumentationLabels(Singletons.ScriptLines));
+            });
+         }
          NotifyPropertyChanged(nameof(Tools));
       }
 
@@ -1467,7 +1499,7 @@ namespace HavenSoft.HexManiac.Core.ViewModels {
          };
       }
 
-      private void RaiseSaveAllCanExecuteChanged(object sender, EventArgs e) => saveAll.CanExecuteChanged.Invoke(this, e);
+      private void RaiseSaveAllCanExecuteChanged(object sender, EventArgs e) => workDispatcher.BlockOnUIWork(() => saveAll.CanExecuteChanged.Invoke(this, e));
 
       private void ExecuteCopyAlignedAddress(IFileSystem fileSystem) {
          if (!(SelectedTab is ViewPort currentTab)) {

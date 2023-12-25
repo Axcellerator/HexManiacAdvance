@@ -1,21 +1,25 @@
 ﻿using HavenSoft.HexManiac.Core;
+using HavenSoft.HexManiac.Core.Models;
+using HavenSoft.HexManiac.Core.Models.Map;
 using HavenSoft.HexManiac.Core.Models.Runs;
+using HavenSoft.HexManiac.Core.ViewModels;
 using HavenSoft.HexManiac.Core.ViewModels.DataFormats;
 using HavenSoft.HexManiac.Core.ViewModels.Map;
 using HavenSoft.HexManiac.Core.ViewModels.Tools;
 using HavenSoft.HexManiac.Tests;
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using Xunit;
 
 namespace HavenSoft.HexManiac.Integration {
    public class MapTests : IntegrationTests {
-      private const string StartTown = "maps.3-0 Pallet Town";
+      private const string StartTown = "maps.bank3.Pallet Town.3-0";
 
       [SkippableFact]
       public void NoConnections_CreateNewMap_AddsConnectionTable() {
          var firered = LoadFireRed();
-         firered.Goto.Execute("maps.1-0 Viridian Forest");
+         firered.Goto.Execute("maps.bank1.Viridian Forest.1-0");
          var leftEdgeButton = firered.MapEditor.MapButtons.Single(button => button.Icon == MapSliderIcons.ExtendLeft);
 
          var newMapButton = leftEdgeButton.ContextItems.Single(item => item.Text == "Create New Map");
@@ -185,6 +189,59 @@ namespace HavenSoft.HexManiac.Integration {
 
          champGuy.ReadAllProperties();
          Assert.True(champGuy.HasScriptAddressError);
+      }
+
+      [SkippableFact]
+      public void FireRed_MapsWithObjects_HaveValidPointers() {
+         var firered = LoadReadOnlyFireRed();
+         var maps = AllMapsModel.Create(firered.Model).SelectMany(bank => bank);
+         Assert.All(maps, map => {
+            var events = map.Events.Element;
+            if (events.GetValue("objectCount") == 0) return;
+            var objectsAddress = events.GetAddress("objects");
+            var objectTable = firered.Model.GetNextRun(objectsAddress);
+            Assert.IsType<TableStreamRun>(objectTable);
+         });
+      }
+
+      [SkippableFact]
+      public void FireRed_SelectMovementPermissionWithoutBlock_CanRectangleDraw() {
+         var firered = LoadFireRed();
+         firered.Goto.Execute(StartTown);
+         var map = firered.MapEditor;
+
+         map.CollisionIndex = 1;
+
+         map.PrimaryDown(0, 0, PrimaryInteractionStart.ControlClick);
+         map.PrimaryUp(0, 0);
+         // no crash = pass
+      }
+
+      [SkippableFact]
+      public void FireRed_DuplicateMapTab_SameTemplate() {
+         var firered = LoadFireRed();
+         var dup = firered.CreateDuplicate();
+         Assert.Same(firered.MapEditor.Templates, dup.MapEditor.Templates);
+      }
+
+      [SkippableFact]
+      public void FireRed_DefaultGotoShortcut_Visible() {
+         var firered = LoadReadOnlyFireRed();
+
+         var editor = new EditorViewModel(FileSystem, InstantDispatch.Instance);
+         editor.Add(firered);
+
+         Assert.Equal(5, editor.GotoViewModel.Shortcuts.Count);
+      }
+
+      [SkippableFact]
+      public void Emerald_DefaultGotoShortcut_Visible() {
+         var emerald = LoadReadOnlyEmerald();
+
+         var editor = new EditorViewModel(FileSystem, InstantDispatch.Instance);
+         editor.Add(emerald);
+
+         Assert.Equal(5, editor.GotoViewModel.Shortcuts.Count);
       }
    }
 }

@@ -62,7 +62,7 @@ namespace HavenSoft.HexManiac.Core.Models.Runs {
          if (currentSegment is ArrayRunRecordSegment recordSegment) currentSegment = recordSegment.CreateConcrete(data, self, index);
          if (currentSegment.Type == ElementContentType.Integer) {
             if (currentSegment is ArrayRunEnumSegment enumSegment) {
-               var value = enumSegment.ToText(data, offsets.SegmentStart, false);
+               var value = enumSegment.ToText(data, offsets.SegmentStart, 0);
                return new IntegerEnum(offsets.SegmentStart, position, value, currentSegment.Length);
             } else if (currentSegment is ArrayRunTupleSegment tupleSegment) {
                return new ViewModels.DataFormats.Tuple(data, tupleSegment, offsets.SegmentStart, position);
@@ -115,7 +115,10 @@ namespace HavenSoft.HexManiac.Core.Models.Runs {
                // if the run isn't a ITableRun, parse the data to see if it's valid
                // if it _is_ an ITableRun, skip this step
                if (currentSegment is ArrayRunPointerSegment pointerSegment && !(run is ITableRun)) {
-                  hasError |= data.FormatRunFactory.GetStrategy(pointerSegment.InnerFormat).TryParseData(data, string.Empty, destination, ref run).HasError;
+                  var strategy = data.FormatRunFactory.GetStrategy(pointerSegment.InnerFormat);
+                  if (strategy != null) {
+                     hasError |= strategy.TryParseData(data, string.Empty, destination, ref run).HasError;
+                  }
                }
             }
          } else {
@@ -124,7 +127,7 @@ namespace HavenSoft.HexManiac.Core.Models.Runs {
          return hasError;
       }
 
-      public static void AppendTo(ITableRun self, IDataModel data, StringBuilder text, int start, int length, bool deep) {
+      public static void AppendTo(ITableRun self, IDataModel data, StringBuilder text, int start, int length, int depth) {
          var names = self.ElementNames;
          var offsets = self.ConvertByteOffsetToArrayOffset(start);
          length += offsets.SegmentOffset;
@@ -153,9 +156,9 @@ namespace HavenSoft.HexManiac.Core.Models.Runs {
 
                if (segment.Length > 0) {
                   if (segment is ArrayRunRecordSegment rSeg) {
-                     text.Append(rSeg.ToText(data, self, offset, deep)?.Trim() ?? string.Empty);
+                     text.Append(rSeg.ToText(data, self, offset, depth)?.Trim() ?? string.Empty);
                   } else {
-                     text.Append(segment.ToText(data, offset, deep)?.Trim() ?? string.Empty);
+                     text.Append(segment.ToText(data, offset, depth)?.Trim() ?? string.Empty);
                   }
                   if (j + 1 < self.ElementContent.Count) text.Append(", ");
                   offset += segment.Length;
@@ -606,7 +609,7 @@ namespace HavenSoft.HexManiac.Core.Models.Runs {
             if (thisRun != null && thisRun.Start == Start) maxLength = ElementLength * thisRun.ElementCount;
             var byteLength = 0;
             var elementCount = 0;
-            while (Start + byteLength + ElementLength <= nextRun.Start && elementCount < 1000 && DataMatchesElementFormat(owner, Start + byteLength, ElementContent, elementCount, flags, nextRun)) {
+            while (Start + byteLength + ElementLength <= nextRun.Start && elementCount < 1500 && DataMatchesElementFormat(owner, Start + byteLength, ElementContent, elementCount, flags, nextRun)) {
                byteLength += ElementLength;
                elementCount++;
                if (elementCount == JunkLimit) flags |= FormatMatchFlags.AllowJunkAfterText;
@@ -1052,7 +1055,7 @@ namespace HavenSoft.HexManiac.Core.Models.Runs {
          }
       }
 
-      public void AppendTo(IDataModel model, StringBuilder builder, int start, int length, bool deep) => ITableRunExtensions.AppendTo(this, model, builder, start, length, deep);
+      public void AppendTo(IDataModel model, StringBuilder builder, int start, int length, int depth) => ITableRunExtensions.AppendTo(this, model, builder, start, length, depth);
 
       public void Clear(IDataModel model, ModelDelta changeToken, int start, int length) {
          ITableRunExtensions.Clear(this, model, changeToken, start, length);
@@ -1313,17 +1316,22 @@ namespace HavenSoft.HexManiac.Core.Models.Runs {
          // if (segments.ToString().Contains("python")) ;
          while (segments.Length > 0) {
             if (segments.StartsWith("[")) {
-               int subArrayClose = segments.LastIndexOf("]");
+               int subArrayClose = segments.MatchPairIndex('[', ']');
                if (subArrayClose == -1) throw new ArrayRunParseException("Found unmatched open bracket ([).");
                var innerSegments = ParseSegments(segments.Slice(1, subArrayClose - 1), model);
                segments = segments.Slice(subArrayClose + 1);
-               int repeatLength = 0;
-               while (repeatLength < segments.Length && char.IsDigit(segments[repeatLength])) repeatLength++;
-               if (!int.TryParse(segments.Slice(0, repeatLength), out int innerCount)) {
+               var repeatEnd = segments.IndexOf(' ');
+               if (repeatEnd == -1) repeatEnd = segments.Length;
+               if (!int.TryParse(segments.Slice(0, repeatEnd), out int innerCount)) {
                   throw new ArrayRunParseException($"Could not parse '{segments}' as a number.");
                }
                for (int i = 0; i < innerCount; i++) list.AddRange(innerSegments);
-               segments = segments.Slice(repeatLength);
+               segments = segments.Slice(repeatEnd);
+               continue;
+            }
+
+            if (segments[0] == ' ') {
+               segments = segments.Slice(1);
                continue;
             }
 
@@ -1334,6 +1342,7 @@ namespace HavenSoft.HexManiac.Core.Models.Runs {
             var (format, formatLength, segmentLength) = ExtractSingleFormat(segments, model);
             if (name == string.Empty && format != ElementContentType.Splitter) throw new ArrayRunParseException($"expected name, but none was found: {segments}");
             if (format == ElementContentType.PCS && segmentLength < 1) throw new ArrayRunParseException($"Cannot have 0-length text: {name}");
+            if (format == ElementContentType.PCS && segmentLength > 1000) throw new ArrayRunParseException($"Cannot have text longer than 1k bytes in a table: {name}");
 
             // check to see if a name or length is part of the format
             if (format == ElementContentType.Integer && segments.Length > formatLength && segments[formatLength] != ' ') {
@@ -1544,10 +1553,12 @@ namespace HavenSoft.HexManiac.Core.Models.Runs {
 
          switch (segment.Type) {
             case ElementContentType.PCS:
-               int readLength = PCSString.ReadString(owner, start, true, segment.Length);
-               if (readLength < 1) return false;
-               if (readLength > segment.Length) return false;
-               if (Enumerable.Range(start, segment.Length).All(i => owner[i] == 0xFF)) return false;
+               if (segment.Length > 1) { // don't check for valid termination if we only expect a single byte
+                  int readLength = PCSString.ReadString(owner, start, true, segment.Length);
+                  if (readLength < 1) return false;
+                  if (readLength > segment.Length) return false;
+                  if (Enumerable.Range(start, segment.Length).All(i => owner[i] == 0xFF)) return false;
+               }
 
                // if we end with a space, and the next one starts with a space, we probably have the data width wrong.
                // We might be the start of a different data segment that is no longer pointed to. (Example: Vega/pokenames)

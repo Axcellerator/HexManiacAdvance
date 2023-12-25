@@ -38,6 +38,8 @@ namespace HavenSoft.HexManiac.Core.Models {
 
       private int oldDataLength = -1, newDataLength = -1;
 
+      public bool DoNotClearConstants { get; init; }
+
       public event EventHandler OnNewChange;
       protected void NotifyOnNewChange() => OnNewChange?.Invoke(this, EventArgs.Empty);
       public bool HasDataChange { get; protected set; }
@@ -241,7 +243,6 @@ namespace HavenSoft.HexManiac.Core.Models {
       }
 
       private IDisposable CaptureNonDataChange() {
-         var initialState = HasAnyChange;
          if (HasAnyChange) return new StubDisposable();
          return new StubDisposable { Dispose = () => {
             if (!HasAnyChange) return;
@@ -255,6 +256,12 @@ namespace HavenSoft.HexManiac.Core.Models {
          throw new InvalidOperationException("This operation is not allowed to change model data!");
       }
    }
+
+   /// <summary>
+   /// Represents a non-data change that should not remove zero-pointer runs.
+   /// This change is transient, so we expect those runs to have new pointers added before the end of the operation.
+   /// </summary>
+   public class TransientModelDelta : NoDataChangeDeltaModel { }
 
    public class NoTrackChange : ModelDelta {
       public override bool ChangeData(IDataModel model, int index, byte data) {

@@ -70,6 +70,8 @@ namespace HavenSoft.HexManiac.Core.ViewModels.Map {
 
       public IPixelViewModel ObjectTemplateImage { get; private set; }
 
+      public IReadOnlyList<IPixelViewModel> OverworldGraphics { get; private set; }
+
       public EventTemplate(IWorkDispatcher dispatcher, IDataModel model, ScriptParser parser, IReadOnlyList<IPixelViewModel> owGraphics) {
          (this.model, this.parser) = (model, parser);
          RefreshLists(owGraphics);
@@ -95,6 +97,7 @@ namespace HavenSoft.HexManiac.Core.ViewModels.Map {
       }
 
       public void RefreshLists(IReadOnlyList<IPixelViewModel> owGraphics) {
+         OverworldGraphics = owGraphics;
          AvailableTemplateTypes.Clear();
          AvailableTemplateTypes.Add(TemplateType.None);
          AvailableTemplateTypes.Add(TemplateType.Npc);
@@ -254,7 +257,7 @@ namespace HavenSoft.HexManiac.Core.ViewModels.Map {
             var trainer = trainers[trainerFlag];
             // structType. class. introMusicAndGender. sprite. name""12 item1: item2: item3: item4: doubleBattle:: ai:: pokemonCount:: pokemon<>
             trainer.SetValue("structType", 0);
-            trainer.SetStringValue("name", "Francis");
+            trainer.SetStringValue("name", "NAME ME");
             trainer.SetValue("item1", 0);
             trainer.SetValue("item2", 0);
             trainer.SetValue("item3", 0);
@@ -360,6 +363,25 @@ namespace HavenSoft.HexManiac.Core.ViewModels.Map {
          var teamPointer = trainers[trainerID].Start + 36;
 
          return new TrainerEventContent(beforePointer, winPointer, afterPointer, trainerClassAddress, trainerID, address + 2, trainerNameAddress, teamPointer);
+      }
+
+      #endregion
+
+      #region Rematch Trainer
+
+      public static RematchTrainerEventContent GetRematchTrainerContent(IDataModel model, ScriptParser parser, ObjectEventViewModel eventModel) {
+         if (eventModel.ScriptAddress < 0) return null;
+         var spots = Flags.GetAllScriptSpots(model, parser, new[] { eventModel.ScriptAddress }, 0x5C).ToList();
+         var rematches = spots.Where(spot => ((int)model[spot.Address + 1]).IsAny(5, 7)).ToList();
+         var trainers = spots.Select(spot => model.ReadMultiByteValue(spot.Address + 2, 2)).Distinct().ToList();
+         if (rematches.Count != 1 || trainers.Count != 1) return null;
+         var beforeTextStart = model.ReadPointer(rematches[0].Address + 6);
+         var winTextStart = model.ReadPointer(rematches[0].Address + 10);
+
+         var textSpot = Flags.GetAllScriptSpots(model, parser, new[] { eventModel.ScriptAddress }, 0x0F).FirstOrDefault();
+         var afterTextStart = textSpot != null ? model.ReadPointer(textSpot.Address + 2) : Pointer.NULL;
+
+         return new(trainers[0], beforeTextStart, winTextStart, afterTextStart);
       }
 
       #endregion
@@ -625,7 +647,7 @@ namespace HavenSoft.HexManiac.Core.ViewModels.Map {
    callstd 5
    {(fr?"normalmsg":string.Empty)}
    copyvar 0x8012 0x8013
-   campare 0x800D 0
+   compare 0x800D 0
    if1 = <failed>
    loadpointer 0 <{whichStart:X6}>
    callstd 4
@@ -655,7 +677,7 @@ failed:
          // maybe just expect a `callstd 5` after it, since it's the only one after infoStart that has that in both FR and Em
 
          var scriptStart = model.FindFreeSpace(model.FreeSpaceStart, 109);
-         var content = parser.Compile(token, model, scriptStart, ref script, out var _, out var _);
+         var content = parser.CompileWithoutErrors(token, model, scriptStart, ref script);
          token.ChangeData(model, scriptStart, content);
 
          objectEventViewModel.Graphics = trainerGraphics;
@@ -800,7 +822,7 @@ wrongspecies:
 ";
 
          var scriptStart = model.FindFreeSpace(model.FreeSpaceStart, 160);
-         var content = parser.Compile(token, model, scriptStart, ref script, out var _, out var _);
+         var content = parser.CompileWithoutErrors(token, model, scriptStart, ref script);
          token.ChangeData(model, scriptStart, content);
 
          objectEventViewModel.Graphics = trainerGraphics;
@@ -939,7 +961,7 @@ end
 
          var scriptStart = model.FindFreeSpace(model.FreeSpaceStart, 160);
          var scriptText = script.ToString();
-         var content = parser.Compile(token, model, scriptStart, ref scriptText, out var _, out var _);
+         var content = parser.CompileWithoutErrors(token, model, scriptStart, ref scriptText);
          token.ChangeData(model, scriptStart, content);
 
          objectEventModel.Graphics = trainerGraphics;
@@ -965,7 +987,7 @@ end
             2A clearflag flag:
             7D bufferPokemon buffer.3 species:data.pokemon.names
          */
-         var spots = Flags.GetAllScriptSpots(model, parser, new[] { ev.ScriptAddress }, 0x67, 0xA1, 0xB6, 0x29, 0x2A, 0x7D);
+         var spots = Flags.GetAllScriptSpots(model, parser, new[] { ev.ScriptAddress }, false, 0x67, 0xA1, 0xB6, 0x29, 0x2A, 0x7D);
          var flagsSet = new Dictionary<int, int>(); // address of flag -> flag value
          var flagsCleared = new Dictionary<int, int>(); // address of flag -> flag value
          var bufferSpots = new Dictionary<int, int>(); // address of buffer -> pokemon to buffer
@@ -1028,7 +1050,7 @@ end
       public void CreateHMObject(ObjectEventViewModel objectEventViewModel, ModelDelta token) {
          var scriptStart = AllMapsModel.Create(model, default)
             .SelectMany(bank => bank)
-            .SelectMany(map => map.Events.Objects)
+            .SelectMany(map => map?.Events.Objects ?? new())
             .Where(obj => obj.Graphics == trainerGraphics)
             .Select(obj => obj.ScriptAddress)
             .ToHistogram()
@@ -1081,6 +1103,8 @@ end
    }
 
    public record TrainerEventContent(int BeforeTextPointer, int WinTextPointer, int AfterTextPointer, int TrainerClassAddress, int TrainerIndex, int TrainerIndexAddress, int TrainerNameAddress, int TeamPointer);
+
+   public record RematchTrainerEventContent(int TrainerID, int BeforeTextPointer, int WinTextPointer, int AfterTextPointer);
 
    public record MartEventContent(int HelloPointer, int MartPointer, int GoodbyePointer);
 

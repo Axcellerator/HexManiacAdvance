@@ -20,6 +20,8 @@ namespace HavenSoft.HexManiac.Core.ViewModels {
       public string MultiLineCommentHeader { get => multiLineCommentStart; set => Set(ref multiLineCommentStart, value); }
       public string MultiLineCommentFooter { get => multiLineCommentEnd; set => Set(ref multiLineCommentEnd, value); }
 
+      public bool SyntaxHighlighting { get; }
+
       public ITextPreProcessor PreFormatter { get; set; }
 
       public event EventHandler RequestCaretMove;
@@ -30,6 +32,13 @@ namespace HavenSoft.HexManiac.Core.ViewModels {
          Constants.CollectionChanged += (sender, e) => UpdateLayers();
       }
 
+      public TextEditorViewModel(bool syntaxHighlighting) {
+         Keywords.CollectionChanged += (sender, e) => UpdateLayers();
+         Constants.CollectionChanged += (sender, e) => UpdateLayers();
+         SyntaxHighlighting = syntaxHighlighting;
+      }
+
+      private bool contentChanging;
       private string content = string.Empty;
       public string Content {
          get => content;
@@ -38,26 +47,18 @@ namespace HavenSoft.HexManiac.Core.ViewModels {
             var oldContent = content;
             content = value;
             UpdateLayers();
-            NotifyPropertyChanged(oldContent, nameof(Content));
+            using (Scope(ref contentChanging, true, back => contentChanging = back)) {
+               NotifyPropertyChanged(oldContent, nameof(Content));
+            }
          }
       }
 
-      public void SaveCaret(int lengthDelta) {
-         if (savedCaret == int.MinValue) savedCaret = caretIndex;
-         savedCaret += lengthDelta;
-      }
-
-      private int caretIndex, savedCaret = int.MinValue;
+      private int caretIndex;
       public int CaretIndex {
          get => caretIndex;
          set {
-            if (savedCaret != int.MinValue) {
-               value = savedCaret;
-               savedCaret = int.MinValue;
-               PushCaretUpdate(value);
-               return;
-            }
-            Set(ref caretIndex, value);
+            if (contentChanging) return;
+            Set(ref caretIndex, value, old => RequestCaretMove.Raise(this));
          }
       }
 
@@ -160,7 +161,7 @@ namespace HavenSoft.HexManiac.Core.ViewModels {
          }
 
          // numeric
-         {
+         if (SyntaxHighlighting) {
             int start = 0;
             while (true) {
                var (index, length) = basic.IndexOfNumber(start);
@@ -229,9 +230,9 @@ namespace HavenSoft.HexManiac.Core.ViewModels {
                yield return (i, closeIndex - i + 1);
                i = closeIndex + 1;
             }
-            if (!char.IsLetter(content[i])) continue;
+            if (i < content.Length && !char.IsLetter(content[i])) continue;
             int length = 1;                                                                                               
-            while (i + length < content.Length && (char.IsLetterOrDigit(content[i + length]) || content[i + length].IsAny(".'-~_".ToCharArray()))) length++;
+            while (i + length < content.Length && (char.IsLetterOrDigit(content[i + length]) || content[i + length].IsAny(".'-~_\\".ToCharArray()))) length++;
             yield return (i, length);
             i += length;
          }

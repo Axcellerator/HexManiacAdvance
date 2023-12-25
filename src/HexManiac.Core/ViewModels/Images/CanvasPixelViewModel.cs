@@ -33,6 +33,7 @@ namespace HavenSoft.HexManiac.Core.ViewModels.Images {
 
       public void Draw(IPixelViewModel foreground, int x, int y) {
          if (foreground == null) return;
+         if (x >= PixelWidth || y >= PixelHeight) return;
          for (int yy = 0; yy < foreground.PixelHeight; yy++) {
             if (y + yy < 0 || y + yy >= PixelHeight) continue;
             if (foreground.Transparent == -1) {
@@ -73,13 +74,13 @@ namespace HavenSoft.HexManiac.Core.ViewModels.Images {
          if (x + y * PixelWidth >= PixelData.Length) return;
          for (int i = 0; i < width - 1; i++) {
             var (p1, p2) = (x + i + y * PixelWidth, x + width - 1 - i + (y + height - 1) * PixelWidth);
-            PixelData[p1] = Darken(PixelData[p1], darkness);
-            PixelData[p2] = Darken(PixelData[p2], darkness);
+            if (p1 < PixelData.Length) PixelData[p1] = Darken(PixelData[p1], darkness);
+            if (p2 < PixelData.Length) PixelData[p2] = Darken(PixelData[p2], darkness);
          }
          for (int i = 0; i < height - 1; i++) {
             var (p1, p2) = (x + (y + height - 1 - i) * PixelWidth, x + width - 1 + (y + i) * PixelWidth);
-            PixelData[p1] = Darken(PixelData[p1], darkness);
-            PixelData[p2] = Darken(PixelData[p2], darkness);
+            if (p1 < PixelData.Length) PixelData[p1] = Darken(PixelData[p1], darkness);
+            if (p2 < PixelData.Length) PixelData[p2] = Darken(PixelData[p2], darkness);
          }
       }
 

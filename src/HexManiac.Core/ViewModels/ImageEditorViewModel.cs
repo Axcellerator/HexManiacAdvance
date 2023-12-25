@@ -1112,7 +1112,7 @@ namespace HavenSoft.HexManiac.Core.ViewModels {
 
                   if (index < fullPalette.Count) {
                      var color = fullPalette[index];
-                     if (spriteOnlyExpects16Colors) color = fullPalette[index + parent.palettePage * 16];
+                     if (spriteOnlyExpects16Colors && (parent.palettePage * 16 + index).InRange(0, fullPalette.Count)) color = fullPalette[index + parent.palettePage * 16];
                      parent.PixelData[parent.PixelIndex(xx, yy)] = color;
                   }
                }
@@ -1121,7 +1121,7 @@ namespace HavenSoft.HexManiac.Core.ViewModels {
 
          public void FlipVertical() {
             var cache = CachePixels();
-            var paletteRun = parent.model.GetNextRun(parent.model.ReadPointer(parent.PalettePointer)) as IPaletteRun;
+            var paletteRun = ReadPalette();
             var pageOffset = (paletteRun?.PaletteFormat.InitialBlankPages) ?? 0;
             int inputPage = 0, outputPage = 0;
 
@@ -1136,13 +1136,17 @@ namespace HavenSoft.HexManiac.Core.ViewModels {
 
                   var index = parent.PaletteIndex(cache[x, selectionHeight - y - 1], inputPage);
                   parent.pixels[selectionStart.X + x, selectionStart.Y + y] = parent.ColorIndex(index, outputPage);
+                  if (underPixels != null && y <= selectionHeight / 2 - 1) {
+                     (underPixels[x, y], underPixels[x, selectionHeight - y - 1]) = (underPixels[x, selectionHeight - y - 1], underPixels[x, y]);
+                     (underMask[x, y], underMask[x, selectionHeight - y - 1]) = (underMask[x, selectionHeight - y - 1], underMask[x, y]);
+                  }
                }
             }
          }
 
          public void FlipHorizontal() {
             var cache = CachePixels();
-            var paletteRun = parent.model.GetNextRun(parent.model.ReadPointer(parent.PalettePointer)) as IPaletteRun;
+            var paletteRun = ReadPalette();
             var pageOffset = (paletteRun?.PaletteFormat.InitialBlankPages) ?? 0;
             int inputPage = 0, outputPage = 0;
 
@@ -1157,8 +1161,18 @@ namespace HavenSoft.HexManiac.Core.ViewModels {
 
                   var index = parent.PaletteIndex(cache[selectionWidth - x - 1, y], inputPage);
                   parent.pixels[selectionStart.X + x, selectionStart.Y + y] = parent.ColorIndex(index, outputPage);
+                  if (underPixels != null && x <= selectionWidth / 2 - 1) {
+                     (underPixels[x, y], underPixels[selectionWidth - x - 1, y]) = (underPixels[selectionWidth - x - 1, y], underPixels[x, y]);
+                     (underMask[x, y], underMask[selectionWidth - x - 1, y]) = (underMask[selectionWidth - x - 1, y], underMask[x, y]);
+                  }
                }
             }
+         }
+
+         private IPaletteRun ReadPalette() {
+            if (parent.PalettePointer == Pointer.NULL) return null;
+            var destination = parent.model.ReadPointer(parent.PalettePointer);
+            return parent.model.GetNextRun(destination) as IPaletteRun;
          }
 
          public void SetUnderPixels(int[,] values) {
